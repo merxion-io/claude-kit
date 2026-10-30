@@ -53,6 +53,22 @@ BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
 mkdir -p "$BIN"
 for cmd in "$TARGET"/bin/*; do if [ -f "$cmd" ] && [ -x "$cmd" ]; then ln -sfn "$cmd" "$BIN/$(basename "$cmd")"; fi; done
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "add $BIN to PATH - the kit commands (claude-role) are there";; esac
+# Private-words guard: git hooks of the kit root (only when it is a git repo); a foreign hook is never overwritten
+if [ -d "$TARGET/.git" ]; then
+  for pair in commit-msg:'--message "$1"' pre-push:'--pre-push "$1"'; do
+    name="${pair%%:*}"; args="${pair#*:}"; hook="$TARGET/.git/hooks/$name"
+    if { [ -e "$hook" ] || [ -L "$hook" ]; } && ! grep -qs '^# claude-kit private-words guard' "$hook"; then
+      echo "git hook $name: a foreign hook is there, left untouched - the private-words guard is not installed in it"
+    else
+      mkdir -p "$TARGET/.git/hooks"
+      printf '#!/usr/bin/env bash\n# claude-kit private-words guard\nexec python3 "$(git rev-parse --show-toplevel)/tools/private_words.py" %s\n' "$args" > "$hook"
+      chmod +x "$hook"
+    fi
+  done
+  if hooks_path="$(git -C "$TARGET" config core.hooksPath)"; then
+    echo "git core.hooksPath is $hooks_path: git does not run .git/hooks here - the private-words guard is not active"
+  fi
+fi
 command -v git >/dev/null || echo 'git is required'
 # macOS: for what is missing — the install command (Homebrew); installs nothing itself
 if [ "$(uname -s)" = Darwin ]; then

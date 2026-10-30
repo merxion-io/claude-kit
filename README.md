@@ -61,6 +61,8 @@ the status line.
 - `token-spend.py` — how much sessions and subagents cost.
 - `write_guard.py` — denies an executor's writes into a git repository (see [docs/roles.md](docs/roles.md)).
 - `skill_gates.py` — denies a project's actions until their skills are loaded.
+- `private_words.py` — fails if a tracked file, its path or a commit message holds a word from the local, untracked
+  `.kit-private-words`; `install.sh` runs it from the `commit-msg` and `pre-push` git hooks.
 - `roles.py` — shared code of the launcher and the hooks: panes, processes, labels, the revive list.
 
 ## Installation

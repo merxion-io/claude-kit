@@ -58,7 +58,7 @@ role's compaction window cannot be set (sub-agents.md).
 - Recount on the same data: splitting the big ones in 2 at planning — ~11 % of builders' money; a hard limit of 100 + a
   fresh one for the remainder — ~9 % (overlaps, and a cut-off leaves a half-edit in the shared tree — not adopted); a late
   extension → fresh — ~5 %.
-- Re-acceptance of the accepted (Codex 10.2026): 265 agents, 122 reviews and audits — a loop.
+- Re-acceptance of the accepted (another agent harness, 10.2026): 265 agents, 122 reviews and audits — a loop.
 - A main-session turn is 1.9 times more expensive than a builder's turn; 55 % of its money is its own code reading, base
   and scripts, orchestration — 10 %. Not levers (measured): the 1-hour cache for subagents, repeated reads, "output
   compressors" like context-mode.
