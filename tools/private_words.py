@@ -2,18 +2,28 @@
 # Guard against private words in a public kit: python3 tools/private_words.py [--message FILE | --range A..B | --pre-push REMOTE]
 # No arguments: the working tree and the index. --message (commit-msg hook): the index and the message. --range: the messages.
 # --pre-push: what the push sends, messages and files of every new commit.
-# The denylist is <kit root>/.kit-private-words (untracked): one word per line, blank lines and # ignored.
+# The denylist is .kit-private-words (untracked) in the main root of the kit: one word per line, blank lines and # ignored.
+# A linked worktree has no copy: the main root is found through git's common dir; outside a repo, the kit root.
 # A hit prints file:line and the word, exit 1. No list or no word in it: one line saying so, exit 0.
 import itertools, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-LIST = os.path.join(ROOT, '.kit-private-words')
+LISTNAME = '.kit-private-words'
 ZERO = '0' * 40
 GITLINK = '160000'
 SCISSORS = '# ------------------------ >8 ------------------------\n'
 
 
-def load_words(path = LIST):
+def list_path():
+    """The list sits in the main working tree, which a linked worktree reaches through git's common dir."""
+    done = subprocess.run(['git', '-C', ROOT, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+                          capture_output = True, text = True)
+    common = done.stdout.strip()
+    main_root = os.path.dirname(common) if done.returncode == 0 and os.path.basename(common) == '.git' else ROOT
+    return os.path.join(main_root, LISTNAME)
+
+
+def load_words(path):
     with open(path, encoding = 'utf-8') as f:
         return [line.strip() for line in f if line.strip() and not line.lstrip().startswith('#')]
 
@@ -120,9 +130,10 @@ def scan_push(pattern, remote, refs):
 
 
 def main(argv):
-    words = load_words() if os.path.exists(LIST) else []
+    path = list_path()
+    words = load_words(path) if os.path.exists(path) else []
     if not words:
-        print(f'private words: no words at {LIST}, nothing to check')
+        print(f'private words: no words at {path}, nothing to check')
         return 0
     pattern = word_pattern(words)
     if argv[:1] == ['--message'] and len(argv) == 2:

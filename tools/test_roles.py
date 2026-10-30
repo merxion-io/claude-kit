@@ -238,6 +238,47 @@ class CloseLive(unittest.TestCase):
             time.sleep(0.1)
         self.fail(f'{session} did not come up: {self.panes()}')
 
+    def test_brief_prints_the_one_path_refuses_bad_names_and_sweeps_only_stale_files(self):
+        self.start('e', 'executor e --to obs')
+        code, out = self.role('brief', 'e')
+        path = f'{self.state}/briefs/obs/e.md'
+        self.assertEqual((code, out.strip()), (0, path), out)
+        self.assertTrue(os.path.isdir(os.path.dirname(path)))
+        for bad in ('a/b', '.hidden', '../x', ' '):
+            code, out = self.role('brief', bad)
+            self.assertEqual(code, 1, (bad, out))
+        mine = {name: f'{self.state}/briefs/obs/{name}.md' for name in ('e', 'gone', 'next')}
+        other = f'{self.state}/briefs/other/gone.md'
+        os.makedirs(os.path.dirname(other))
+        for file in (*mine.values(), other):
+            with open(file, 'w') as f:
+                f.write('task')
+        self.assertEqual(self.role('brief', 'next')[0], 0)
+        self.assertEqual({n: os.path.exists(f) for n, f in mine.items()}, {'e': True, 'gone': False, 'next': True})
+        self.assertTrue(os.path.exists(other))
+
+    def test_brief_is_for_an_observer_only(self):
+        out = subprocess.run([sys.executable, os.path.join(KIT, 'bin/claude-role'), 'brief', 'e'], env = self.env,
+                             capture_output = True, text = True)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+
+    def test_close_deletes_the_brief_on_both_paths_and_a_missing_file_is_fine(self):
+        self.start('e', 'executor e --to obs')
+        path = self.role('brief', 'e')[1].strip()
+        with open(path, 'w') as f:
+            f.write('task')
+        self.assertEqual(self.role('close', 'e')[0], 0)
+        self.assertFalse(os.path.exists(path))
+
+    def test_close_of_an_entry_with_no_pane_deletes_the_brief_too(self):
+        self.start('e', 'executor e --to obs')
+        path = self.role('brief', 'e')[1].strip()
+        with open(path, 'w') as f:
+            f.write('task')
+        self.tmux('kill-session', '-t', '=e')
+        code, out = self.role('close', 'e')
+        self.assertEqual((code, 'no pane' in out, os.path.exists(path)), (0, True, False), out)
+
     def test_normal_close_marks_closed_before_the_session_goes_and_leaves_nothing(self):
         self.start('e', 'executor e --to obs')
         code, out = self.role('close', 'e')
@@ -358,6 +399,22 @@ class ScanDuringClose(unittest.TestCase):
     def test_a_real_death_still_wakes_it(self):
         self.assertEqual(self.main([moment(DEAD, None, OPEN)] * 3), 2)
         self.assertEqual(self.main([moment(DEAD, self.RUNNING, OPEN)] * 3), 2)
+
+
+class RoleIntro(unittest.TestCase):
+    def line(self, role):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('TMUX', 'CLAUDE_'))}
+        env.update(CLAUDE_ROLE = role, CLAUDE_ROLE_NAME = 'n', TMUX_PANE = '%1')
+        out = subprocess.run([sys.executable, os.path.join(KIT, 'hooks/role-intro.py')], env = env, capture_output = True, text = True).stdout
+        return json.loads(out)['hookSpecificOutput']['additionalContext'] if out else ''
+
+    def test_an_executor_gets_the_chat_rule(self):
+        self.assertIn('Chat: English and terse; choice windows in the operator\'s language', self.line('executor'))
+
+    def test_an_observer_gets_none_of_it_and_no_role_is_silent(self):
+        self.assertNotIn('Chat:', self.line('observer'))
+        self.assertIn('ToolSearch', self.line('observer'))
+        self.assertEqual(self.line('none'), '')
 
 
 class ObserverTable(unittest.TestCase):

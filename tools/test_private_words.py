@@ -256,6 +256,29 @@ class PrivateWords(unittest.TestCase):
         self.git('config', 'core.hooksPath', 'elsewhere')
         self.assertIn('core.hooksPath', self.install())
 
+    def test_a_linked_worktree_reads_the_list_of_the_main_root(self):
+        self.list_words()
+        self.write('docs/a.md', 'clean\n')
+        self.git('add', 'tools/private_words.py')
+        self.git('commit', '-q', '-m', 'one')
+        linked = os.path.join(tempfile.mkdtemp(), 'linked')
+        self.addCleanup(shutil.rmtree, os.path.dirname(linked), True)
+        self.git('worktree', 'add', '-q', '-b', 'side', linked)
+        with open(os.path.join(linked, 'docs', 'a.md'), 'w', encoding = 'utf-8') as f:
+            f.write('the zorblax is here\n')
+        done = subprocess.run([sys.executable, os.path.join(linked, 'tools', 'private_words.py')], capture_output = True, text = True)
+        self.assertEqual((done.returncode, 'docs/a.md (not staged):1: zorblax' in done.stdout), (1, True), done.stdout)
+
+    def test_outside_a_repo_the_list_is_read_beside_the_tools(self):
+        plain = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, plain, True)
+        os.makedirs(os.path.join(plain, 'tools'))
+        shutil.copy(GUARD, os.path.join(plain, 'tools'))
+        with open(os.path.join(plain, '.kit-private-words'), 'w') as f:
+            f.write('zorblax\n')
+        done = subprocess.run([sys.executable, os.path.join(plain, 'tools', 'private_words.py')], capture_output = True, text = True)
+        self.assertNotIn('no words at', done.stdout)  # the list was found; git itself then has no repo to scan
+
     def test_a_dangling_link_at_a_hook_is_foreign_too(self):
         target = os.path.join(tempfile.mkdtemp(), 'theirs')
         hook = os.path.join(self.repo, '.git', 'hooks', 'pre-push')

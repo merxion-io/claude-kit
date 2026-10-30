@@ -11,6 +11,9 @@
 #   claude-role send "<executor>" "<text>"              — type a message into its input box: refused on a window or foreign text
 #   claude-role close "<executor>" [--force]            — the observer closes its own executor normally: /exit, labels, list, tmux session, pult;
 #                                                       --force for a hung one; refused on an open window, even with --force
+#   claude-role brief "<executor>"                      — the observer asks for the path of that executor's one brief file
+#                                                       (<state dir>/briefs/<observer>/<executor>.md; a new task rewrites it, close deletes it);
+#                                                       creates the folder, deletes the files of executors no longer in its list
 #   claude-role doctor                                  — machine self-check: what is there, what is missing and what to do
 #   claude-role observer "<name>" -r                    — bring the observer back up with the same conversation (after a reboot)
 # Role and name go into the claude environment (CLAUDE_ROLE, CLAUDE_ROLE_NAME), into the session name (--name) and into pane labels:
@@ -39,6 +42,7 @@ USAGE = ('claude-role observer [<name>] [--project <pult project>] [--no-remote-
          '       claude-role last "<executor>"\n'
          '       claude-role send "<executor>" "<text>"   (refused on an open window or foreign text in the box)\n'
          '       claude-role close "<executor>" [--force]   (refused on an open window even with --force)\n'
+         '       claude-role brief "<executor>"   (observer only: prints the path of its one brief file; close deletes it)\n'
          '       claude-role doctor')
 OPTION = re.compile(r'^\s*(?:❯\s*)?(\d)\.\s+(.+?)\s*$')
 CURSOR = re.compile(r'^\s*❯\s*\d\.\s')  # cursor of the choice window on a numbered item
@@ -550,6 +554,7 @@ def close_without_pane(me, name):
         raise Refusal(f'executor "{name}" is of observer "{foreign}", not yours, not touching it' if foreign is not None
                       else f'observer "{me}" has no executor "{name}"')
     mark_closed(me, name)
+    roles.drop_brief(me, name)
     print(f'"{name}": no pane, list entry closed{forgotten_in_pult(entry.get("session"))}')
 
 
@@ -572,7 +577,24 @@ def close(argv):
             raise Refusal(f'"{name}": not closed: {why}')
         exit_forced(me, name, pane) if force else exit_normally(name, pane_id)
     done = clear_closed(me, name, pane_id, pane['session_name'])
+    roles.drop_brief(me, name)
     print(f'"{name}": closed{" by force" if force else ""}, {done}{forgotten_in_pult(pane["session_name"])}')
+
+
+def brief(argv):
+    """The observer's one brief file for an executor (own or about to be launched): its path; stale files of that observer go."""
+    me = os.environ.get('CLAUDE_ROLE_NAME')
+    if os.environ.get('CLAUDE_ROLE') != 'observer' or not me:
+        raise Refusal('only an observer asks for a brief path, from its own claude-role observer session')
+    if len(argv) != 1:
+        raise Refusal('claude-role brief "<executor>"')
+    try:
+        path = roles.brief_path(me, argv[0])
+    except ValueError as why:
+        raise Refusal(str(why))
+    os.makedirs(os.path.dirname(path), exist_ok = True)
+    roles.sweep_briefs(me, argv[0])
+    print(path)
 
 
 def own_resume(name, flags):
@@ -734,7 +756,7 @@ def main(argv):
         return revive(argv[1:])
     if argv[:1] == ['tell']:
         return tell(argv[1:])
-    for command in (status, last, send, close):
+    for command in (status, last, send, close, brief):
         if argv[:1] == [command.__name__]:
             return command(argv[1:])
     role, name, options, flags = parse(argv)

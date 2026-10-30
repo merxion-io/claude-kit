@@ -7,6 +7,7 @@ How the observer and executor roles work. The short version is in the [README](.
 ```bash
 claude-role observer [<name>] [--project <pult project>] [--no-remote-control] [claude flags...]   # the name defaults to the tmux session
 claude-role executor "<name>" [--to <observer>] [--project <pult project>] [claude flags...]
+claude-role brief "<executor>"                                     # observer: the path of the executor's brief file
 claude-role doctor                                                # self-check of the machine
 ```
 
@@ -20,6 +21,13 @@ In a pane where a claude with a role is already running, the launcher refuses.
 
 An executor sends no pushes to the phone (the `no-mobile-push` muffler and the `PushNotification` prohibition) and does
 not start while there is no live observer in tmux; if there are several, `--to` is needed.
+
+## Briefs
+
+One brief file per executor: `claude-role brief "<executor>"` (observer only; an own executor or a name about to be
+launched) prints `<state dir>/briefs/<observer>/<executor>.md` and creates the folder; it refuses a name with `/` or a
+leading dot. A new task rewrites the file. `claude-role close` deletes it on every closing path (a missing file is
+fine). `brief` also deletes the files of that observer whose executor is no longer in its list, except the one asked for.
 
 ## Environment and labels
 
