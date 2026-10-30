@@ -110,6 +110,16 @@ The observer may press in an executor's window only with `claude-role press "<ex
   tmux buffer and Enter is pressed only while the text is in the box; a busy executor takes it into its turn.
 - Delivery stays text in the box, not the session messaging: an agent may ignore that.
 
+## close
+
+`claude-role close "<executor>" [--force]`: the one way to end a finished executor, only the caller's own.
+- Refused on an open choice or permission window, always. Without `--force` also while it works, asks, tells or waits
+  for its background, and on a dialog or someone's text in the box.
+- Otherwise `/exit` goes through the box, a normal SessionEnd. The list entry is marked closed before the tmux session
+  goes, so the waiter reports no death. The tmux session is removed only if it holds just this pane; pult forgets it.
+- `--force`, for a hung one: SIGTERM, then SIGKILL, of the PID in the pane's label, only while that PID is its live claude.
+- With no pane left, close marks the entry closed. Revive skips closed entries.
+
 ## Guards on the observer
 
 `hooks/agent-guard.py` denies the observer's `tmux send-keys`/`paste-buffer` into a pane whose `@claude_role` is

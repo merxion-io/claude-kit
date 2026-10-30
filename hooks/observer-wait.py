@@ -39,9 +39,9 @@ def attention(me, all_panes, tree, now, team, started):
         name, label, where = p['@claude_name'], p['@claude_state'], p['pane_id']
         seen = p['@claude_seen']
         if not roles.live(p, 'executor', tree):
-            if not label:
-                continue  # closed normally: SessionEnd (not a kill) erased the label
             entry = team.get(name, {})
+            if not label or entry.get('closed'):
+                continue  # closed normally: SessionEnd (not a kill) erased the label, or close marked the entry first
             key, what = f'died{SEP}{label}', f'died (claude is not running), last: {label}'
             if entry.get('pane') == where:
                 key, seen, where = death(entry), entry.get('seen'), None
@@ -98,8 +98,10 @@ def main():
         return 0
     take_over(pane)
     while roles.pane_option(pane, WAITER) == str(os.getpid()) and alive(claude):
+        # Processes, panes, list, in this order: a list older than the panes reads a normal close as "died".
+        tree, all_panes = roles.processes(), roles.panes()
         team = roles.read_roster().get(me, {}).get('executors', {})
-        found = attention(me, roles.panes(), roles.processes(), time.time(), team, roles.server_start())
+        found = attention(me, all_panes, tree, time.time(), team, roles.server_start())
         if found:
             for executor_pane, name, key, _ in found:
                 if executor_pane:

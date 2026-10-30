@@ -9,6 +9,8 @@
 #   claude-role status "<executor>"                     — one line: state and how long, session status, window, stale label
 #   claude-role last "<executor>"                       — the executor's last answer text from its transcript (cut at TELL_LIMIT)
 #   claude-role send "<executor>" "<text>"              — type a message into its input box: refused on a window or foreign text
+#   claude-role close "<executor>" [--force]            — the observer closes its own executor normally: /exit, labels, list, tmux session, pult;
+#                                                       --force for a hung one; refused on an open window, even with --force
 #   claude-role doctor                                  — machine self-check: what is there, what is missing and what to do
 #   claude-role observer "<name>" -r                    — bring the observer back up with the same conversation (after a reboot)
 # Role and name go into the claude environment (CLAUDE_ROLE, CLAUDE_ROLE_NAME), into the session name (--name) and into pane labels:
@@ -20,7 +22,7 @@
 # if the project cannot be determined unambiguously — the executor is refused (the choice is --project), the observer
 # starts outside pult with one line why. The project goes into the list: revive passes it itself. The list
 # of executors to bring back after a reboot is state/roles.json in the kit root (format — tools/roles.py).
-import glob, json, os, platform, re, shlex, shutil, subprocess, sys, tempfile, time
+import contextlib, glob, json, os, platform, re, shlex, shutil, signal, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'tools'))
 import roles
@@ -36,6 +38,7 @@ USAGE = ('claude-role observer [<name>] [--project <pult project>] [--no-remote-
          '       claude-role status "<executor>"\n'
          '       claude-role last "<executor>"\n'
          '       claude-role send "<executor>" "<text>"   (refused on an open window or foreign text in the box)\n'
+         '       claude-role close "<executor>" [--force]   (refused on an open window even with --force)\n'
          '       claude-role doctor')
 OPTION = re.compile(r'^\s*(?:❯\s*)?(\d)\.\s+(.+?)\s*$')
 CURSOR = re.compile(r'^\s*❯\s*\d\.\s')  # cursor of the choice window on a numbered item
@@ -56,7 +59,7 @@ OPTIONS = {'observer': ('--project',), 'executor': ('--to', '--project')}  # lau
 def parse(argv):
     """argv without the program name → (role, name or None, {--to, --project: value or None}, claude flags)."""
     if not argv or argv[0] not in ('observer', 'executor'):
-        raise Refusal('role: observer or executor (or press, revive, doctor)\n' + USAGE)
+        raise Refusal('role: observer or executor (or press, revive, close, doctor)\n' + USAGE)
     role, rest = argv[0], argv[1:]
     name = rest.pop(0) if rest and not rest[0].startswith('-') else None
     if role == 'executor' and not name:
@@ -163,6 +166,13 @@ def settled(pane, before):
     return before
 
 
+def own_pane(name, me):
+    """The pane of observer me's executor by name, a live one before a stale pane of the same name; not its own: None."""
+    tree = processes()
+    return min((p for p in panes() if p['@claude_role'] == 'executor' and p['@claude_name'] == name
+                and p['@claude_observer'] == me), key = lambda p: not live(p, 'executor', tree), default = None)
+
+
 def press(argv):
     """The observer presses ONCE in its executor's window, only if the window is visible on the screen."""
     if len(argv) != 2 or not (argv[1].isdigit() and len(argv[1]) == 1 or argv[1] == 'Escape'):
@@ -171,8 +181,7 @@ def press(argv):
     me = os.environ.get('CLAUDE_ROLE_NAME')
     if os.environ.get('CLAUDE_ROLE') != 'observer' or not me:
         raise Refusal('only an observer presses, from its own claude-role observer session')
-    pane = next((p for p in panes() if p['@claude_role'] == 'executor' and p['@claude_name'] == name
-                 and p['@claude_observer'] == me), None)
+    pane = own_pane(name, me)
     if not pane:
         raise Refusal(f'observer "{me}" has no executor "{name}"')
     screen = roles.tmux('capture-pane', '-p', '-t', pane['pane_id'])
@@ -387,6 +396,12 @@ def send(argv):
     why = blocked(Screen(pane))
     if why:
         raise Refusal(f'"{name}": not sent — {why}')
+    typed(name, pane, text)
+    print(f'to "{name}": sent ({len(text)} chars)')
+
+
+def typed(name, pane, text):
+    """Into the input box: whole by a tmux buffer, Enter only while our text is there; not taken → refusal."""
     buffer = f'claude-role-{os.getpid()}'
     with tempfile.NamedTemporaryFile('w', encoding = 'utf-8', suffix = '.txt', delete = False) as f:
         f.write(text)
@@ -404,9 +419,160 @@ def send(argv):
             break  # our text is not in the box any more: no Enter, it would send something else
         roles.tmux('send-keys', '-t', pane, 'Enter')
         if waited(pane, lambda box: box is None or not screen_mod.ours(box[0], text), TOOK):
-            print(f'to "{name}": sent ({len(text)} chars)')
             return
     raise Refusal(f'"{name}": enter refused — the text stays in the input box as is')
+
+
+# close: the normal end of an executor: nothing it still works on or asks about is cut, and the waiter never sees a death.
+CLOSE_WAIT = 20  # s — how long /exit has to end claude
+FORCE_WAIT = 10  # s — how long each signal has
+CLOSE_BLOCKS = (roles.WORKING, roles.RUNNING, roles.BACKGROUND, roles.ASKING, roles.PERMISSION, roles.TELLING)
+
+
+def close_refusal(pane, session, screen, force):
+    """Why a live executor is not closed now → reason or None. A window is not a hang: --force does not lift it."""
+    shown = window(screen.plain)
+    if shown:
+        return f'a choice/permission window is open ({shown["head"] or "choice"}): answer it with press or press Escape'
+    if force:
+        return None
+    kind = roles.parse_state(pane['@claude_state'])[0]
+    why = f'its state is "{kind}"' if kind in CLOSE_BLOCKS else \
+        'its session is busy' if session and session.get('status') == 'busy' else blocked(screen)
+    return f'{why}; hung: --force' if why else None
+
+
+def ended(pane_id, seconds):
+    """Claude is gone from the pane, or the pane itself, within seconds; 0: right now."""
+    deadline = time.time() + seconds
+    while True:
+        pane = roles.find_pane(pane_id)
+        if not pane or not live(pane, 'executor', processes()):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def exit_normally(name, pane_id):
+    try:
+        typed(name, pane_id, '/exit')
+    except (Refusal, subprocess.CalledProcessError):
+        if not ended(pane_id, TOOK):  # otherwise the box answers no more because claude is gone, with its pane or leaving its last frame
+            raise
+    if not ended(pane_id, CLOSE_WAIT):
+        raise Refusal(f'"{name}": claude still runs {CLOSE_WAIT} s after /exit; nothing cleaned, label stays; hung: --force')
+
+
+@contextlib.contextmanager
+def unless_pane_gone(pane_id):
+    """tmux steps on a pane that may go at any moment: its going is not a failure, any other failure stays one."""
+    try:
+        yield
+    except subprocess.CalledProcessError:
+        if roles.find_pane(pane_id):
+            raise
+
+
+def exit_forced(me, name, pane):
+    """By the PID of the pane's own label, each signal only while that claude is live; no pattern. Closed in the list
+    before the first signal: a pane with no shell goes with claude, and the waiter must not take that for a death."""
+    pane_id, pid = pane['pane_id'], pane[roles.PID_LABEL]
+    if not pid.isdigit():
+        raise Refusal(f'"{name}": pane {pane_id} has no {roles.PID_LABEL}, nothing to signal')
+    with unless_pane_gone(pane_id):
+        roles.unset_pane_option(pane_id, roles.STATE)
+    mark_closed(me, name)
+    for sign in (signal.SIGTERM, signal.SIGKILL):
+        if ended(pane_id, 0):
+            return
+        try:
+            os.kill(int(pid), sign)
+        except ProcessLookupError:  # exited after the check above
+            return
+        if ended(pane_id, FORCE_WAIT):
+            return
+    roles.update_roster(me, 'executor', name, {'closed': False})
+    raise Refusal(f'"{name}": PID {pid} outlived SIGKILL; state label removed, the rest stays')
+
+
+def forgotten_in_pult(session):
+    """Pult forgets a session of its journal that is gone → the part of the final line; a failure is one line, not an error."""
+    try:
+        journal = roles.pult_journal()
+        if not journal or session not in journal[1] or roles.has_session(session):
+            return ''
+        why = roles.pult_forget(session)
+    except (OSError, subprocess.CalledProcessError) as e:
+        why = str(e)
+    if why:
+        print(f'pult did not forget {session}: {why}')
+        return ''
+    return ', forgotten in pult'
+
+
+def mark_closed(me, name):
+    """Closed in the list; confirmed now: with no pane the entry goes at once, it does not wait for a revive like one from before the server start."""
+    roles.update_roster(me, 'executor', name, {'closed': True, 'since': int(time.time())})
+
+
+def clear_closed(me, name, pane_id, session):
+    """Claude is gone: labels off, closed in the list BEFORE the session goes (the waiter never sees "died"), the session
+    goes with its twins (a pane lives while any of them shows it) if nothing else is in it, the entry drops. → what became of the session."""
+    pane = roles.find_pane(pane_id)
+    if pane:
+        with unless_pane_gone(pane_id):
+            roles.unset_pane_option(pane_id, roles.STATE)
+            roles.unset_pane_option(pane_id, roles.SEEN)
+    mark_closed(me, name)
+    why = None
+    if pane:
+        with unless_pane_gone(pane_id):
+            others = roles.tmux('list-panes', '-s', '-t', f'={session}', '-F', '#{pane_id}').split() != [pane_id]
+            why = 'it holds other panes' if others else \
+                None if roles.idle_shell(pane) else f'{pane["pane_current_command"]} runs in pane {pane_id}'
+            if why:
+                roles.unset_pane_option(pane_id, '@claude_role')
+                roles.unset_pane_option(pane_id, '@claude_name')
+            else:
+                for twin in roles.session_group(session):
+                    roles.tmux('kill-session', '-t', f'={twin}')
+    roles.update_roster()
+    return f'session {session} stays: {why}' if why else f'session {session} removed' if pane else f'pane {pane_id} is gone'
+
+
+def close_without_pane(me, name):
+    """No own pane: only an open entry of the own list is left to close."""
+    entry = roles.read_roster().get(me, {}).get('executors', {}).get(name)
+    if not entry or entry.get('closed'):
+        foreign = next((p['@claude_observer'] for p in panes() if p['@claude_role'] == 'executor'
+                        and p['@claude_name'] == name), None)
+        raise Refusal(f'executor "{name}" is of observer "{foreign}", not yours, not touching it' if foreign is not None
+                      else f'observer "{me}" has no executor "{name}"')
+    mark_closed(me, name)
+    print(f'"{name}": no pane, list entry closed{forgotten_in_pult(entry.get("session"))}')
+
+
+def close(argv):
+    """The observer closes its own executor: see the comment above CLOSE_WAIT."""
+    rest = [a for a in argv if a != '--force']
+    if len(rest) != 1 or len(argv) > 2 or not rest[0].strip():
+        raise Refusal('claude-role close "<executor>" [--force]')
+    name, force = rest[0], len(argv) == 2
+    me = os.environ.get('CLAUDE_ROLE_NAME')
+    if os.environ.get('CLAUDE_ROLE') != 'observer' or not me:
+        raise Refusal('only an observer closes, from its own claude-role observer session')
+    pane = own_pane(name, me)
+    if not pane:
+        return close_without_pane(me, name)
+    pane_id = pane['pane_id']
+    if live(pane, 'executor', processes()):
+        why = close_refusal(pane, session_file(pane), Screen(pane_id), force)
+        if why:
+            raise Refusal(f'"{name}": not closed: {why}')
+        exit_forced(me, name, pane) if force else exit_normally(name, pane_id)
+    done = clear_closed(me, name, pane_id, pane['session_name'])
+    print(f'"{name}": closed{" by force" if force else ""}, {done}{forgotten_in_pult(pane["session_name"])}')
 
 
 def own_resume(name, flags):
@@ -431,6 +597,9 @@ def revive(argv):
     team = roles.read_roster().get(me, {}).get('executors', {})
     all_panes, tree, journal = panes(), processes(), roles.pult_journal()
     for name, entry in team.items():
+        if entry.get('closed'):
+            print(f'"{name}": closed, not bringing up')
+            continue
         p = next((p for p in all_panes if p['@claude_role'] == 'executor' and p['@claude_name'] == name
                   and p['@claude_observer'] == me), None)
         if p and live(p, 'executor', tree):
@@ -565,7 +734,7 @@ def main(argv):
         return revive(argv[1:])
     if argv[:1] == ['tell']:
         return tell(argv[1:])
-    for command in (status, last, send):
+    for command in (status, last, send, close):
         if argv[:1] == [command.__name__]:
             return command(argv[1:])
     role, name, options, flags = parse(argv)

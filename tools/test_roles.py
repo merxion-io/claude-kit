@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# Waiter scan and screen footer rule: python3 tools/test_roles.py. The real waiter scan (hooks/observer-wait.py attention)
+# Waiter scan, screen footer rule, close and revive of closed entries: python3 tools/test_roles.py. The real waiter scan (hooks/observer-wait.py attention)
 # reads the state labels; screen.dialog reads a captured pane.
-import importlib.machinery, importlib.util, os, sys, tempfile, time, unittest
+import importlib.machinery, importlib.util, io, itertools, json, os, re, shutil, signal, subprocess, sys, tempfile, time, types, unittest
+from unittest import mock
 
 KIT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(KIT, 'tools'))
@@ -28,12 +29,15 @@ def label(kind, text = 'x', stamp = STAMP):
     return roles.SEP.join((kind, stamp, text))
 
 
-def scan(state, seen = '', now = None):
-    """The real scan over one live executor pane → the (pane, name, key, line) it wakes the observer on."""
-    pane = {'pane_id': '%7', 'session_name': 's', 'pane_pid': '90', 'pane_current_command': 'claude',
+def executor_pane(state, seen = ''):
+    return {'pane_id': '%7', 'session_name': 's', 'pane_pid': '90', 'pane_current_command': 'claude',
             '@claude_role': 'executor', '@claude_name': 'e', '@claude_observer': 'me', '@claude_state': state,
             '@claude_seen': seen, '@claude_flags': '', roles.PID_LABEL: '100'}
-    return waiter.attention('me', [pane], PROCS, now or time.mktime(time.strptime(STAMP, roles.TIME_FORMAT)) + 1, {}, 0)
+
+
+def scan(state, seen = '', now = None):
+    """The real scan over one live executor pane → the (pane, name, key, line) it wakes the observer on."""
+    return waiter.attention('me', [executor_pane(state, seen)], PROCS, now or time.mktime(time.strptime(STAMP, roles.TIME_FORMAT)) + 1, {}, 0)
 
 
 class NewLabels(unittest.TestCase):
@@ -60,6 +64,309 @@ class Footer(unittest.TestCase):
                      'esc to cancel \u03c0\u03b1\u03c1\u03b1\u03ba\u03b1\u03bb\u03ce',  # Greek
                      'esc to cancel \u65e5\u672c\u8a9e'):  # CJK
             self.assertIsNone(screen.dialog(self.pane(line)), line)
+
+
+def captured(*lines):
+    raw = '\n'.join(lines) + '\n'
+    return types.SimpleNamespace(raw = raw, plain = raw)
+
+
+BOX = ('\u2500' * 20, '\u276f ', '\u2500' * 20)
+WINDOW = ('Do you want to proceed?', '\u276f 1. Yes', '  2. No')
+
+
+class CloseRefusal(unittest.TestCase):
+    def reason(self, state = '', session = None, screen = None, force = False):
+        return launcher.close_refusal({'@claude_state': state}, session, screen or captured(*BOX), force)
+
+    def test_idle_executor_closes(self):
+        self.assertIsNone(self.reason(label(roles.STOPPED), {'status': 'idle'}))
+        self.assertIsNone(self.reason(label(roles.OPENED)))
+
+    def test_window_refuses_even_with_force(self):
+        for force in (False, True):
+            why = self.reason(screen = captured(*WINDOW), force = force)
+            self.assertIn('press or press Escape', why)
+            self.assertNotIn('--force', why)
+
+    def test_each_working_or_asking_state_refuses_without_force_only(self):
+        for kind in (roles.WORKING, roles.RUNNING, roles.BACKGROUND, roles.ASKING, roles.PERMISSION, roles.TELLING):
+            self.assertIn(kind, self.reason(label(kind)))
+            self.assertIn('--force', self.reason(label(kind)))
+            self.assertIsNone(self.reason(label(kind), force = True), kind)
+
+    def test_busy_session_refuses_without_force_only(self):
+        self.assertIn('busy', self.reason(label(roles.STOPPED), {'status': 'busy'}))
+        self.assertIsNone(self.reason(label(roles.STOPPED), {'status': 'busy'}, force = True))
+
+    def test_screen_that_takes_no_message_refuses_without_force_only(self):
+        for lines, word in ((('Enter to confirm \u00b7 Esc to cancel',), 'dialog'), (('plain text',), 'no input box'),
+                            ((BOX[0], '\u276f someone typed', BOX[2]), 'not ours')):
+            self.assertIn(word, self.reason(screen = captured(*lines)))
+            self.assertIsNone(self.reason(screen = captured(*lines), force = True), word)
+
+
+class ClosedEntries(unittest.TestCase):
+    def test_waiter_gives_nothing_for_a_closed_entry_with_no_pane(self):
+        entry = {'pane': '%9', 'session': 's', 'since': 10, 'closed': True}
+        self.assertEqual(waiter.attention('me', [], {}, time.time(), {'e': entry}, 0), [])
+        self.assertEqual(len(waiter.attention('me', [], {}, time.time(), {'e': {**entry, 'closed': False}}, 0)), 1)
+
+    def test_revive_skips_a_closed_entry_and_brings_up_an_open_one(self):
+        with open(roles.ROSTER, 'w') as f:
+            json.dump({'me': {'executors': {'done': {'session': 'a', 'closed': True}, 'gone': {'session': 'b'}}}}, f)
+        self.addCleanup(os.remove, roles.ROSTER)
+        with mock.patch.dict(os.environ, {'CLAUDE_ROLE': 'observer', 'CLAUDE_ROLE_NAME': 'me'}), \
+                mock.patch.object(launcher, 'panes', return_value = []), \
+                mock.patch.object(launcher, 'processes', return_value = {}), \
+                mock.patch.object(roles, 'pult_journal', return_value = None), \
+                mock.patch.object(roles, 'wait_live', return_value = True), \
+                mock.patch.object(roles, 'relaunch', return_value = '%1') as relaunch, \
+                mock.patch('builtins.print'):
+            launcher.revive([])
+        self.assertEqual([call.args[1] for call in relaunch.call_args_list], ['gone'])
+
+
+# close end to end: the real launcher and role-state hook, a fake claude with an input box, a private tmux server.
+# claude-role in-process with its race forced for real: the signal comes only after claude is gone (late-signal), the
+# session goes just before the n-th tmux call on it (vanish n).
+RACE = """
+import importlib.machinery, importlib.util, os, signal, sys, time
+kit, race, argv = sys.argv[1], sys.argv[2], sys.argv[3:]
+loader = importlib.machinery.SourceFileLoader('claude_role', f'{kit}/bin/claude-role')
+launcher = importlib.util.module_from_spec(importlib.util.spec_from_loader('claude_role', loader))
+loader.exec_module(launcher)
+roles = launcher.roles
+if race == 'late-signal':
+    kill = os.kill
+    def late(pid, sign):
+        if sign == signal.SIGTERM:
+            kill(pid, signal.SIGKILL)
+            while launcher.processes().get(pid):
+                time.sleep(0.05)
+        kill(pid, sign)
+    os.kill = late
+else:
+    tmux, left = roles.tmux, int(race)
+    def vanishing(*args):
+        global left
+        if args[0] in ('set-option', 'kill-session') or args[:2] == ('list-panes', '-s'):
+            left -= 1
+            if left == 0:
+                tmux('kill-session', '-t', '=e')
+        return tmux(*args)
+    roles.tmux = vanishing
+launcher.main(argv)
+"""
+
+FAKE_CLAUDE = """#!/usr/bin/env python3
+import json, os, shutil, signal, subprocess, sys, tty
+def terminated(*_):
+    state = os.environ['CLAUDE_ROLES_STATE_DIR']
+    shutil.copy(f'{state}/roles.json', f'{state}/at-term.json')
+    sys.exit(1)
+signal.signal(signal.SIGTERM, terminated)
+def hook(event, **fields):
+    subprocess.run([sys.executable, os.environ['LAB_HOOK']], capture_output = True, text = True, input = json.dumps(
+        {'hook_event_name': event, 'session_id': f'c{os.getpid()}', 'cwd': os.getcwd(), **fields}))
+hook('SessionStart', source = 'startup')
+tty.setraw(0)
+text = ''
+while True:
+    sys.stdout.write('\\x1b[2J\\x1b[H' + '\\u2500' * 30 + '\\r\\n\\u276f ' + text + '\\r\\n' + '\\u2500' * 30 + '\\r\\n')
+    sys.stdout.flush()
+    for c in os.read(0, 1024).decode():
+        if c in '\\r\\n':
+            if text == '/exit':
+                hook('SessionEnd', reason = 'prompt_input_exit')
+                sys.exit(0)
+            text = ''
+        else:
+            text += c
+"""
+
+
+@unittest.skipUnless(shutil.which('tmux'), 'no tmux')
+class CloseLive(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.mkdtemp(dir = '/tmp', prefix = 'cr')
+        self.addCleanup(shutil.rmtree, root, True)
+        bin_dir, self.state, self.at_kill = f'{root}/bin', f'{root}/state', f'{root}/at-kill.json'
+        os.makedirs(bin_dir)
+        os.makedirs(self.state)
+        tmux = shutil.which('tmux')
+        for name, body in (('claude', FAKE_CLAUDE), ('tmux.conf', 'set -g default-command "bash --norc --noprofile"\n'), ('tmux', (
+                f'#!/bin/bash\ncase " $* " in *" kill-session "*) cp {self.state}/roles.json {self.at_kill};; esac\n'
+                f'exec "{tmux}" -S {root}/s -f {bin_dir}/tmux.conf "$@"\n'))):
+            with open(f'{bin_dir}/{name}', 'w') as f:
+                f.write(body)
+            os.chmod(f'{bin_dir}/{name}', 0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('TMUX', 'CLAUDE_'))}
+        self.env = {**env, 'PATH': f'{bin_dir}:/usr/bin:/bin', 'SHELL': '/bin/bash', 'CLAUDE_ROLES_STATE_DIR': self.state,
+                    'XDG_STATE_HOME': f'{root}/xdg', 'CLAUDE_CONFIG_DIR': f'{root}/cfg',
+                    'LAB_HOOK': os.path.join(KIT, 'hooks/role-state.py')}
+        self.observer = {**self.env, 'CLAUDE_ROLE': 'observer', 'CLAUDE_ROLE_NAME': 'obs', 'TMUX': f'{root}/s,0,0'}
+        self.tmux('new-session', '-d', '-s', 'boot')
+        self.addCleanup(self.tmux, 'kill-server')
+        self.start('obs', 'observer obs --no-remote-control')
+
+    def tmux(self, *args):
+        return subprocess.run(['tmux', *args], env = self.env, capture_output = True, text = True).stdout
+
+    def role(self, *args):
+        out = subprocess.run([sys.executable, os.path.join(KIT, 'bin/claude-role'), *args], env = self.observer,
+                             capture_output = True, text = True)
+        return out.returncode, out.stdout + out.stderr
+
+    def panes(self):
+        rows = self.tmux('list-panes', '-a', '-F', '#{session_name}\t#{@claude_name}\t#{@claude_pid}').splitlines()
+        return [row.split('\t') for row in rows]
+
+    def team(self, observer = 'obs'):
+        with open(f'{self.state}/roles.json') as f:
+            return json.load(f).get(observer, {}).get('executors', {})
+
+    def start(self, session, role):
+        """claude-role <role> in the shell of a new session, up to its input box."""
+        self.tmux('new-session', '-d', '-s', session)
+        self.tmux('send-keys', '-t', f'={session}:', f'python3 {KIT}/bin/claude-role {role}', 'Enter')
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if any(s == session and pid for s, _, pid in self.panes()) \
+                    and '\u276f' in self.tmux('capture-pane', '-p', '-t', f'={session}:'):
+                return
+            time.sleep(0.1)
+        self.fail(f'{session} did not come up: {self.panes()}')
+
+    def test_normal_close_marks_closed_before_the_session_goes_and_leaves_nothing(self):
+        self.start('e', 'executor e --to obs')
+        code, out = self.role('close', 'e')
+        self.assertEqual((code, 'session e removed' in out), (0, True), out)
+        with open(self.at_kill) as f:
+            self.assertTrue(json.load(f)['obs']['executors']['e']['closed'])
+        self.assertNotIn('e', [s for s, *_ in self.panes()])
+        self.assertEqual(self.team(), {})
+
+    def test_a_view_of_the_session_goes_with_it(self):
+        self.start('e', 'executor e --to obs')
+        self.tmux('new-session', '-d', '-t', 'e', '-s', 'e~1')
+        code, out = self.role('close', 'e')
+        self.assertEqual(code, 0, out)
+        self.assertEqual([s for s, name, _ in self.panes() if s.startswith('e') or name == 'e'], [])
+        self.assertEqual(self.team(), {})
+
+    def test_of_two_with_one_name_the_live_one_is_closed_then_the_stale_one_leaving_no_entry(self):
+        self.start('a', 'executor e --to obs')
+        os.kill(int(next(pid for s, _, pid in self.panes() if s == 'a')), signal.SIGKILL)
+        time.sleep(0.3)
+        self.start('e', 'executor e --to obs')
+        code, out = self.role('close', 'e')
+        self.assertEqual(code, 0, out)
+        self.assertEqual([s for s, name, _ in self.panes() if name == 'e'], ['a'])
+        self.assertEqual(self.team(), {})
+        self.role('close', 'e')
+        self.assertEqual([s for s, name, _ in self.panes() if name == 'e'], [])
+        self.assertEqual(self.team(), {})
+
+    def test_a_dead_one_has_no_session_end_close_itself_marks_it_before_the_session_goes(self):
+        self.start('e', 'executor e --to obs')
+        os.kill(int(next(pid for s, _, pid in self.panes() if s == 'e')), signal.SIGKILL)
+        time.sleep(0.3)
+        self.assertEqual(self.role('close', 'e')[0], 0)
+        with open(self.at_kill) as f:
+            self.assertTrue(json.load(f)['obs']['executors']['e']['closed'])
+        self.assertEqual(self.team(), {})
+
+    def test_force_signals_only_its_own_and_another_observers_executor_is_refused(self):
+        self.start('e', 'executor e --to obs')
+        self.start('obs2', 'observer obs2 --no-remote-control')
+        self.start('f', 'executor f --to obs2')
+        self.assertEqual(self.role('close', 'f', '--force')[0], 1)
+        self.assertIn('f', [s for s, *_ in self.panes()])
+        code, out = self.role('close', 'e', '--force')
+        self.assertEqual(code, 0, out)
+        self.assertEqual({s for s, *_ in self.panes()}, {'boot', 'obs', 'obs2', 'f'})
+        with open(f'{self.state}/at-term.json') as f:
+            self.assertTrue(json.load(f)['obs']['executors']['e']['closed'])
+
+    def raced(self, race, *args):
+        out = subprocess.run([sys.executable, '-c', RACE, KIT, race, *args], env = self.observer, capture_output = True, text = True)
+        return out.returncode, out.stdout + out.stderr
+
+    def test_claude_gone_before_the_signal_is_no_failure_cleanup_goes_on(self):
+        self.start('e', 'executor e --to obs')
+        code, out = self.raced('late-signal', 'close', 'e', '--force')
+        self.assertEqual((code, 'closed by force' in out), (0, True), out)
+        self.assertEqual(self.team(), {})
+
+    def test_pane_gone_before_the_first_label_of_a_forced_close_is_no_failure(self):
+        self.start('e', 'executor e --to obs')
+        code, out = self.raced('1', 'close', 'e', '--force')
+        self.assertEqual((code, 'closed by force' in out), (0, True), out)
+        self.assertEqual(self.team(), {})
+
+    def test_pane_gone_at_any_tmux_step_of_a_repeat_close_is_no_failure(self):
+        for step in ('1', '2', '3', '4'):
+            with self.subTest(step = step):
+                self.start('e', 'executor e --to obs')
+                os.kill(int(next(pid for s, _, pid in self.panes() if s == 'e')), signal.SIGKILL)
+                time.sleep(0.3)
+                code, out = self.raced(step, 'close', 'e')
+                self.assertEqual((code, '"e": closed' in out), (0, True), out)
+                self.assertEqual(self.team(), {})
+                self.assertNotIn('e', [s for s, *_ in self.panes()])
+
+
+LIVE, DEAD = PROCS, {90: PROCS[90]}
+OPEN, CLOSED = {'pane': '%7', 'session': 's', 'since': 1}, {'pane': '%7', 'session': 's', 'since': 1, 'closed': True}
+
+
+def moment(tree, state, entry):
+    """What a read sees at one moment of a close; state None: the pane is gone; entry None: dropped from the list."""
+    return {'processes': tree, 'panes': [] if state is None else [executor_pane(state)],
+            'read_roster': {'me': {'executors': {'e': entry} if entry else {}}}}
+
+
+class ScanDuringClose(unittest.TestCase):
+    """The moments of a close, in their order; the real waiter main reads each of its three reads at any later or same moment."""
+    RUNNING = label(roles.RUNNING)  # no hang clock, unlike working
+    NORMAL = [moment(LIVE, RUNNING, OPEN), moment(LIVE, '', OPEN), moment(DEAD, '', OPEN), moment(DEAD, '', CLOSED),
+              moment(DEAD, None, CLOSED), moment(DEAD, None, None)]
+    FORCED = [moment(LIVE, RUNNING, OPEN), moment(LIVE, '', OPEN), moment(LIVE, '', CLOSED), moment(DEAD, '', CLOSED),
+              moment(DEAD, None, CLOSED), moment(DEAD, None, None)]
+    RACED = [moment(LIVE, '', CLOSED), moment(LIVE, RUNNING, CLOSED), moment(DEAD, RUNNING, CLOSED), moment(DEAD, '', CLOSED)]  # a hook in flight wrote the label again
+
+    def main(self, worlds):
+        """→ exit code of the waiter main whose k-th read of one scan sees worlds[k]."""
+        reads = iter(worlds)
+        def reader(what):
+            return lambda: next(reads)[what]
+        pid = str(os.getpid())
+        with mock.patch.multiple(roles, role_session = lambda: 'observer', own_claude = os.getpid, server_start = lambda: 0,
+                                 pane_option = mock.Mock(side_effect = [pid, pid, '']), set_pane_option = mock.DEFAULT,
+                                 unset_pane_option = mock.DEFAULT, update_roster = mock.DEFAULT, forget_tell = mock.DEFAULT,
+                                 processes = reader('processes'), panes = reader('panes'), read_roster = reader('read_roster')), \
+                mock.patch.dict(os.environ, {'TMUX_PANE': '%1', 'CLAUDE_ROLE_NAME': 'me'}), \
+                mock.patch('sys.stdin', io.StringIO()), mock.patch('sys.stderr', io.StringIO()), mock.patch('time.sleep'):
+            return waiter.main()
+
+    def test_no_order_of_a_close_and_the_reads_wakes_the_observer(self):
+        for close in (self.NORMAL, self.FORCED, self.RACED):
+            for moments in itertools.combinations_with_replacement(close, 3):
+                self.assertEqual(self.main(moments), 0, moments)
+
+    def test_a_real_death_still_wakes_it(self):
+        self.assertEqual(self.main([moment(DEAD, None, OPEN)] * 3), 2)
+        self.assertEqual(self.main([moment(DEAD, self.RUNNING, OPEN)] * 3), 2)
+
+
+class ObserverTable(unittest.TestCase):
+    def test_every_command_of_the_usage_is_in_the_skill_table(self):
+        with open(os.path.join(KIT, 'skills/roles/SKILL.md'), encoding = 'utf-8') as f:
+            table = ' '.join(line for line in f if line.startswith('|'))
+        commands = set(re.findall(r'claude-role (\w+)', launcher.USAGE))
+        self.assertIn('close', commands)
+        self.assertEqual({c for c in commands if f'claude-role {c}' not in table}, set())
 
 
 if __name__ == '__main__':

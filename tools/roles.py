@@ -435,6 +435,23 @@ def pult_adopt(session, project, name):
     return None if out.returncode == 0 else (out.stdout + out.stderr).strip()
 
 
+def pult_forget(session):
+    """Removes a session with no live tmux session from the pult journal (pult forget). → None or pult's answer."""
+    out = subprocess.run([PULT, 'forget', session], capture_output = True, text = True)
+    return None if out.returncode == 0 else (out.stdout + out.stderr).strip()
+
+
+def has_session(session):
+    return subprocess.run(['tmux', 'has-session', '-t', f'={session}'], capture_output = True).returncode == 0
+
+
+def session_group(session):
+    """The session and its twins (tmux new-session -t): all of them show the same windows."""
+    rows = [line.split('\t') for line in tmux('list-sessions', '-F', '#{session_name}\t#{session_group}').splitlines()]
+    group = next((g for n, g in rows if n == session), '')
+    return [n for n, g in rows if n == session or group and g == group]
+
+
 def relaunch(role, name, observer, entry, pane = None, prompt = None):
     """Starts claude-role of the role with the same conversation and flags: in pane (its shell is replaced) or, no pane,
     as a window in session entry['session'], and with no session as a new session. After claude exits a shell stays in the pane."""
@@ -450,8 +467,7 @@ def relaunch(role, name, observer, entry, pane = None, prompt = None):
         tmux('respawn-pane', '-k', '-t', pane, *where, shell, '-c', line)
         return pane
     session = entry.get('session') or name
-    has_session = subprocess.run(['tmux', 'has-session', '-t', f'={session}'], capture_output = True).returncode == 0
-    if has_session:
+    if has_session(session):
         return tmux('new-window', '-P', '-F', '#{pane_id}', '-t', f'={session}:', *where, shell, '-c', line).strip()
     return tmux('new-session', '-d', '-P', '-F', '#{pane_id}', '-s', session, *where, shell, '-c', line).strip()
 
