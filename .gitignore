@@ -1,0 +1,18 @@
+# The agent kit: only kit files go in git, everything else in ~/.claude is machine-specific and personal
+/*
+!/.gitignore
+!/README.md
+!/install.sh
+!/CLAUDE.md
+!/settings.base.json
+!/agents/
+!/bin/
+!/hooks/
+!/tools/
+!/skills/
+!/docs/
+/skills/synced/
+*.bak*
+__pycache__/
+/skills/task-manager/
+/tools/quality/.venv/

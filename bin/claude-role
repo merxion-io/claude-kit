@@ -1,0 +1,622 @@
+#!/usr/bin/env python3
+# Launch Claude Code as observer or executor — only in a tmux pane.
+#   claude-role observer [<name>] [--project <pult project>] [--no-remote-control] [claude flags…] — remote control on by default, named as the observer
+#   claude-role executor "<name>" [--to <observer>] [--project <pult project>] [claude flags…]
+#   claude-role press "<executor>" <digit|Escape>   — the observer presses a key in the executor's permission/choice window
+#   claude-role revive                                  — the observer brings its executors back up from the list
+#   claude-role tell "<text>"                          — the executor tells its observer a fact or a question without a choice;
+#                                                       delivered in full up to roles.TELL_LIMIT chars, longer is refused
+#   claude-role status "<executor>"                     — one line: state and how long, session status, window, stale label
+#   claude-role last "<executor>"                       — the executor's last answer text from its transcript (cut at TELL_LIMIT)
+#   claude-role send "<executor>" "<text>"              — type a message into its input box: refused on a window or foreign text
+#   claude-role doctor                                  — machine self-check: what is there, what is missing and what to do
+#   claude-role observer "<name>" -r                    — bring the observer back up with the same conversation (after a reboot)
+# Role and name go into the claude environment (CLAUDE_ROLE, CLAUDE_ROLE_NAME), into the session name (--name) and into pane labels:
+# @claude_role, @claude_name, @claude_observer (on the executor), @claude_flags (launch flags — for the revive). The labels, the
+# list and pult are written by SessionStart of the started claude (hooks/role-state.py) — the launcher only passes them in the environment:
+# if claude did not start (--help, error), nothing is touched. In a pane where claude with a role is already running, the launcher refuses.
+# The executor gets both push protections and does not start without a live observer. With pult, a session of either role
+# that is not in the pult journal is assigned to a project by folder (the longest project folder that the launch runs in);
+# if the project cannot be determined unambiguously — the executor is refused (the choice is --project), the observer
+# starts outside pult with one line why. The project goes into the list: revive passes it itself. The list
+# of executors to bring back after a reboot is state/roles.json in the kit root (format — tools/roles.py).
+import glob, json, os, platform, re, shlex, shutil, subprocess, sys, tempfile, time
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'tools'))
+import roles
+import screen as screen_mod
+from roles import ROLE_NAMES, SILENCER, live, panes, processes
+
+NO_PUSH_TOOL = '--disallowedTools=PushNotification'  # via «=»: with a space-separated list the flag would swallow the prompt
+USAGE = ('claude-role observer [<name>] [--project <pult project>] [--no-remote-control] [claude flags…]   (remote control on by default)\n'
+         '       claude-role executor "<name>" [--to <observer>] [--project <pult project>] [claude flags…]   (no remote control unless given)\n'
+         '       claude-role press "<executor>" <digit|Escape>\n'
+         '       claude-role revive\n'
+         f'       claude-role tell "<text>"   (delivered in full up to {roles.TELL_LIMIT} chars; longer: a file and its path)\n'
+         '       claude-role status "<executor>"\n'
+         '       claude-role last "<executor>"\n'
+         '       claude-role send "<executor>" "<text>"   (refused on an open window or foreign text in the box)\n'
+         '       claude-role doctor')
+OPTION = re.compile(r'^\s*(?:❯\s*)?(\d)\.\s+(.+?)\s*$')
+CURSOR = re.compile(r'^\s*❯\s*\d\.\s')  # cursor of the choice window on a numbered item
+PROMPT = re.compile(r'^\s*❯(?!\s*\d\.)')  # input field: no window under it
+TABS = re.compile(r'^\s*←.*→\s*$')  # tab strip of a window with several questions
+WARNING = '⚠'
+SCREEN_LINES = 40
+SETTLE = 3  # s — how long to wait for the screen to react to a keypress
+
+
+class Refusal(Exception):
+    pass
+
+
+OPTIONS = {'observer': ('--project',), 'executor': ('--to', '--project')}  # launcher options, not claude flags
+
+
+def parse(argv):
+    """argv without the program name → (role, name or None, {--to, --project: value or None}, claude flags)."""
+    if not argv or argv[0] not in ('observer', 'executor'):
+        raise Refusal('role: observer or executor (or press, revive, doctor)\n' + USAGE)
+    role, rest = argv[0], argv[1:]
+    name = rest.pop(0) if rest and not rest[0].startswith('-') else None
+    if role == 'executor' and not name:
+        raise Refusal('an executor needs a name: claude-role executor "<name>" …')
+    options, flags, i = dict.fromkeys(OPTIONS['executor']), [], 0
+    while i < len(rest):
+        arg = rest[i]
+        option = arg.split('=', 1)[0]
+        if option in OPTIONS[role]:
+            if '=' in arg:
+                options[option] = arg.split('=', 1)[1]
+            elif i + 1 >= len(rest):
+                raise Refusal(f'{arg} without a value')
+            else:
+                options[option], i = rest[i + 1], i + 1
+        else:
+            flags.append(arg)
+        i += 1
+    return role, name, options, flags
+
+
+def pick_observer(all_panes, to, tree):
+    observers = sorted({p['@claude_name'] for p in all_panes if live(p, 'observer', tree)})
+    if not observers:
+        raise Refusal('no live observer: an executor does not start without an observer. '
+                      'First, in its own tmux pane: claude-role observer [<name>]')
+    if to is not None:
+        if to not in observers:
+            raise Refusal(f'observer "{to}" is not among the live ones; live: {", ".join(observers)}')
+        return to
+    if len(observers) > 1:
+        raise Refusal(f'several live observers, give --to <name>: {", ".join(observers)}')
+    return observers[0]
+
+
+def refuse_duplicate(all_panes, me, role, name, observer, tree):
+    """The name is the revive key: two live ones with one name under one observer cannot be told apart."""
+    for p in all_panes:
+        if p['pane_id'] != me and p['@claude_name'] == name and live(p, role, tree) \
+                and (role == 'observer' or p['@claude_observer'] == observer):
+            raise Refusal(f'"{name}" already runs in pane {p["pane_id"]} (session {p["session_name"]})')
+
+
+def window(screen):
+    """A permission or choice window at the bottom of the screen (cursor on a numbered item, no input field under it) →
+    {options: {digit: text}, head: the line above the items, warning: the warning of a tabbed window or None};
+    no window → None. The window footer is not needed: the "Review your answers" screen has none."""
+    lines = [line for line in screen.splitlines() if line.strip()][-SCREEN_LINES:]  # a tall pane is empty at the bottom
+    cursor = max((i for i, line in enumerate(lines) if CURSOR.match(line)), default = None)
+    if cursor is None or any(PROMPT.match(line) for line in lines[cursor + 1:]):
+        return None
+    first = max((i for i, line in enumerate(lines[:cursor + 1])
+                 if (m := OPTION.match(line)) and m.group(1) == '1'), default = None)
+    if first is None:
+        return None
+    options = {}
+    for line in lines[first:]:
+        m = OPTION.match(line)
+        if m and int(m.group(1)) == len(options) + 1:
+            options[m.group(1)] = m.group(2)
+    tabs = max((i for i, line in enumerate(lines[:first]) if TABS.match(line)), default = None)
+    warning = None if tabs is None else next((line.strip() for line in lines[tabs + 1:first]
+                                              if line.strip().startswith(WARNING)), None)
+    return {'options': options, 'head': lines[first - 1].strip() if first else '', 'warning': warning}
+
+
+def after_press(state, key, option):
+    """The label once the window left the screen: the executor's hooks see neither a grant, a refusal nor an interruption."""
+    kind, _, text = roles.parse_state(state)
+    refused = key == 'Escape' or option.startswith('No')
+    if kind == roles.PERMISSION:
+        if text.startswith(roles.BUILDER):
+            verdict = 'builder refused' if refused else 'builder allowed'
+            return roles.BACKGROUND, f'{verdict}: {text[len(roles.BUILDER):]}'
+        if refused:
+            return roles.STOPPED, f'refused: {text}'
+        return (roles.RUNNING if text.startswith('Bash: ') else roles.WORKING), f'allowed: {text}'
+    if refused:
+        return roles.STOPPED, f'question refused: {text}'
+    return roles.WORKING, f'answer: {"; ".join(chosen(text) + [option])}'
+
+
+def chosen(text):
+    """Choices of earlier steps of the same window, from the "asking" label that press wrote."""
+    return text[len(roles.CHOSEN):].split(roles.NEXT)[0].split('; ') if text.startswith(roles.CHOSEN) else []
+
+
+def still_asking(state, option, after):
+    """The window did not go after the press (next tab, confirmation screen): "asking" with a new text: a different
+    label wakes the observer if it stops before finishing the window."""
+    kind, _, text = roles.parse_state(state)
+    return kind if kind in (roles.ASKING, roles.PERMISSION) else roles.ASKING, f'{roles.CHOSEN}{"; ".join(chosen(text) + [option])}{roles.NEXT}{after["head"]}'
+
+
+def settled(pane, before):
+    """The screen after a press: waits until it changes and a moment more to finish drawing; unchanged within SETTLE: as is."""
+    deadline = time.time() + SETTLE
+    while time.time() < deadline:
+        time.sleep(0.2)
+        screen = roles.tmux('capture-pane', '-p', '-t', pane)
+        if screen != before:
+            time.sleep(0.3)
+            return roles.tmux('capture-pane', '-p', '-t', pane)
+    return before
+
+
+def press(argv):
+    """The observer presses ONCE in its executor's window, only if the window is visible on the screen."""
+    if len(argv) != 2 or not (argv[1].isdigit() and len(argv[1]) == 1 or argv[1] == 'Escape'):
+        raise Refusal('claude-role press "<executor>" <digit|Escape>')
+    name, key = argv
+    me = os.environ.get('CLAUDE_ROLE_NAME')
+    if os.environ.get('CLAUDE_ROLE') != 'observer' or not me:
+        raise Refusal('only an observer presses, from its own claude-role observer session')
+    pane = next((p for p in panes() if p['@claude_role'] == 'executor' and p['@claude_name'] == name
+                 and p['@claude_observer'] == me), None)
+    if not pane:
+        raise Refusal(f'observer "{me}" has no executor "{name}"')
+    screen = roles.tmux('capture-pane', '-p', '-t', pane['pane_id'])
+    shown = window(screen)
+    if not shown:
+        raise Refusal(f'no permission or choice window on the screen of "{name}", not pressing')
+    options = shown['options']
+    if key != 'Escape' and key not in options:
+        raise Refusal(f'the window has no item {key}; items: ' + '; '.join(f'{k}. {v}' for k, v in options.items()))
+    if key != 'Escape' and shown['warning']:
+        raise Refusal(f'the window of "{name}" warns: {shown["warning"]}; not pressing, the answer would go incomplete; '
+                      f'Escape and answer with a line')
+    roles.tmux('send-keys', '-t', pane['pane_id'], key)
+    after = window(settled(pane['pane_id'], screen))
+    option = options.get(key, key)
+    state = pane['@claude_state']
+    roles.write_state(pane['pane_id'], *(still_asking(state, option, after) if after
+                                         else after_press(state, key, option)))
+    print(f'"{name}": pressed {key}' + (f', window still open: {after["head"]}' if after else ', window gone'))
+
+
+def tell(argv):
+    """The executor tells its observer: the state "telling the observer · <text>" in the same label: the waiter wakes on
+    it as on "asking"; the label holds until the waiter has seen it. The label is short, the full text (up to TELL_LIMIT)
+    is in the tell file, the waiter gives it to the observer whole."""
+    if len(argv) != 1 or not argv[0].strip():
+        raise Refusal('claude-role tell "<text>"')
+    if roles.role_session() != 'executor':
+        raise Refusal('only an executor tells, from its own claude-role executor session')
+    pane, name = os.environ['TMUX_PANE'], os.environ.get('CLAUDE_ROLE_NAME', '')
+    observer = os.environ.get(roles.ROLE_OBSERVER) or roles.pane_option(pane, '@claude_observer')
+    if len(argv[0]) > roles.TELL_LIMIT:
+        raise Refusal(f'tell is {len(argv[0])} chars, the limit is {roles.TELL_LIMIT}: put the long part in a file and '
+                      'tell its path; nothing sent')
+    with roles.state_lock(pane):
+        roles.write_state(pane, roles.TELLING, argv[0], roles.write_tell(pane, argv[0]))
+    revived = roles.revive_observer(observer, name)
+    print(f'to observer "{observer}": {roles.short(argv[0])}' + (f' (observer: {revived})' if revived else ''))
+
+
+# status / last / send: the observer reads an executor by one line and types into its box safely, instead of
+# capture-pane and blind send-keys. Delivery stays text in the executor's input box (the operator types there too).
+CONFIG = os.environ.get('CLAUDE_CONFIG_DIR') or os.path.expanduser('~/.claude')
+STALE = 60  # s — label and session file disagree longer than this → the label is stale
+LANDED = 10  # s — how long to wait for the pasted text to show in the box
+TOOK = 3  # s — how long one Enter has to empty the box
+
+
+def executor(name):
+    """Pane of the executor by name: the caller's own first (its @claude_observer), unknown → refusal."""
+    me = os.environ.get('CLAUDE_ROLE_NAME') if os.environ.get('CLAUDE_ROLE') == 'observer' else None
+    found = [p for p in panes() if p['@claude_role'] == 'executor' and p['@claude_name'] == name]
+    found.sort(key = lambda p: p['@claude_observer'] != me)
+    if not found:
+        raise Refusal(f'no executor "{name}"; executors: ' +
+                      ', '.join(sorted({p['@claude_name'] for p in panes() if p['@claude_role'] == 'executor'})))
+    return found[0]
+
+
+def session_file(pane):
+    """Claude Code's own ~/.claude/sessions/<pid>.json of the pane: by its tmux field (pane id after the last dot),
+    else by the role's PID label."""
+    for path in glob.glob(os.path.join(CONFIG, 'sessions', '*.json')):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if str(data.get('tmux', '')).rsplit('.', 1)[-1] == pane['pane_id'] or str(data.get('pid')) == pane[roles.PID_LABEL]:
+            return data
+    return None
+
+
+def lasting(seconds):
+    seconds = int(max(0, seconds))
+    return f'{seconds // 3600}h{seconds // 60 % 60:02d}m' if seconds >= 3600 else \
+        f'{seconds // 60}m{seconds % 60:02d}s' if seconds >= 60 else f'{seconds}s'
+
+
+def status_line(pane, session, screen, now):
+    """One line: state and for how long, its text, Claude Code's own status, window on the screen, disagreement."""
+    kind, since, text = roles.parse_state(pane['@claude_state'])
+    parts = [f'{kind} for {lasting(now - since)}' + (f': {text}' if text else '') if kind else 'no state label']
+    stale = None
+    if session:
+        status, at = session.get('status', '?'), (session.get('statusUpdatedAt') or 0) / 1000
+        parts.append(f'session {status} for {lasting(now - at)}')
+        old = since is not None and now - since > STALE and now - at > STALE
+        if old and kind in (roles.WORKING, roles.RUNNING) and status == 'idle':
+            stale = 'label says working, the session is idle'
+        elif old and kind in (roles.STOPPED, roles.BROKEN, roles.OPENED) and status == 'busy':
+            stale = 'label says not working, the session is busy'
+    else:
+        parts.append('no session file')
+    shown, mark = window(screen.plain), screen_mod.dialog(screen.raw)
+    parts.append(f'window: {shown["head"] or "choice"}' if shown else f'dialog: {mark}' if mark else 'window: none')
+    if stale:
+        parts.append(f'label stale ({stale}) — check the screen')
+    return f'"{pane["@claude_name"]}" ({pane["session_name"]}): ' + ' · '.join(parts)
+
+
+class Screen:
+    def __init__(self, pane_id):
+        self.raw = roles.tmux('capture-pane', '-e', '-p', '-t', pane_id)
+        self.plain = screen_mod.plain(self.raw)
+
+
+def status(argv):
+    if len(argv) != 1:
+        raise Refusal('claude-role status "<executor>"')
+    pane = executor(argv[0])
+    print(status_line(pane, session_file(pane), Screen(pane['pane_id']), time.time()))
+
+
+def transcript(session):
+    cwd = re.sub(r'[^A-Za-z0-9]', '-', session.get('cwd', ''))
+    return os.path.join(CONFIG, 'projects', cwd, f'{session.get("sessionId")}.jsonl')
+
+
+def records_backwards(path, chunk = 1 << 20):
+    """JSONL records from the end of the file, without reading all of it."""
+    with open(path, 'rb') as f:
+        f.seek(0, 2)
+        end, rest = f.tell(), b''
+        while end > 0:
+            start = max(0, end - chunk)
+            f.seek(start)
+            lines = (f.read(end - start) + rest).split(b'\n')
+            rest, end = (lines.pop(0) if start else b''), start
+            for line in reversed(lines):
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    continue
+        if rest:
+            yield json.loads(rest)
+
+
+def last_text(path):
+    """→ (last assistant text of the main conversation, the turn still goes on). The newest user/assistant record
+    decides the turn: a tool call, a tool result or a fresh prompt — in progress; text only — done."""
+    in_progress, message, texts = None, None, []
+    for r in records_backwards(path):
+        if r.get('type') not in ('user', 'assistant') or r.get('isSidechain') or r.get('isMeta'):
+            continue
+        body = r.get('message') or {}
+        blocks = body.get('content') if isinstance(body.get('content'), list) else \
+            [{'type': 'text', 'text': body.get('content') or ''}]
+        kinds = {b.get('type') for b in blocks}
+        if in_progress is None and kinds - {'thinking', 'redacted_thinking'}:
+            in_progress = r['type'] == 'user' or 'tool_use' in kinds
+        if message is not None and body.get('id') != message:
+            break
+        if r['type'] == 'assistant' and 'text' in kinds:
+            message = body.get('id')
+            texts[:0] = [b.get('text', '') for b in blocks if b.get('type') == 'text']
+    return '\n'.join(t.strip() for t in texts if t.strip()), bool(in_progress)
+
+
+def last(argv):
+    if len(argv) != 1:
+        raise Refusal('claude-role last "<executor>"')
+    pane = executor(argv[0])
+    session = session_file(pane)
+    if not session:
+        raise Refusal(f'"{argv[0]}": no Claude Code session file for pane {pane["pane_id"]}')
+    path = transcript(session)
+    if not os.path.exists(path):
+        raise Refusal(f'"{argv[0]}": no transcript {path}')
+    text, going = last_text(path)
+    cut = len(text) > roles.TELL_LIMIT
+    print(('turn in progress; last text so far:\n' if going else '') + (text[:roles.TELL_LIMIT] + '…' if cut else text or '(no text yet)')
+          + (f'\n(cut at {roles.TELL_LIMIT}; full: {path})' if cut else ''))
+
+
+def blocked(screen):
+    """Why the screen takes no message: a window, a dialog, no input box, or someone else's text in it."""
+    shown = window(screen.plain)
+    if shown:
+        return f'a choice/permission window is open ({shown["head"] or "choice"}) — answer it with press'
+    mark = screen_mod.dialog(screen.raw)
+    if mark:
+        return f'a dialog or menu holds the screen ("{mark}") — Enter would confirm it'
+    box = screen_mod.input_box(screen.raw)
+    if box is None:
+        return 'no input box on the screen'
+    if box[0]:
+        return f'the input box holds text that is not ours: "{roles.short(box[0])}" — left as is'
+    return None
+
+
+def box_now(pane_id):
+    return screen_mod.input_box(Screen(pane_id).raw)
+
+
+def waited(pane_id, test, seconds):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        box = box_now(pane_id)
+        if test(box):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def send(argv):
+    """Type a message into the executor's input box: whole by a tmux buffer, Enter only while our text is there."""
+    if len(argv) != 2 or not argv[1].strip():
+        raise Refusal('claude-role send "<executor>" "<text>"')
+    name, text = argv
+    pane = executor(name)['pane_id']
+    why = blocked(Screen(pane))
+    if why:
+        raise Refusal(f'"{name}": not sent — {why}')
+    buffer = f'claude-role-{os.getpid()}'
+    with tempfile.NamedTemporaryFile('w', encoding = 'utf-8', suffix = '.txt', delete = False) as f:
+        f.write(text)
+    try:
+        roles.tmux('load-buffer', '-b', buffer, f.name)
+        roles.tmux('paste-buffer', '-b', buffer, '-d', '-p', '-t', pane)
+    finally:
+        os.unlink(f.name)
+        subprocess.run(['tmux', 'delete-buffer', '-b', buffer], capture_output = True)
+    if not waited(pane, lambda box: box is not None and screen_mod.ours(box[0], text), LANDED):
+        raise Refusal(f'"{name}": pasted, but the text did not show in the input box — no Enter; check the screen')
+    for _ in range(2):  # one retry of Enter
+        box = box_now(pane)
+        if box is None or not screen_mod.ours(box[0], text):
+            break  # our text is not in the box any more: no Enter, it would send something else
+        roles.tmux('send-keys', '-t', pane, 'Enter')
+        if waited(pane, lambda box: box is None or not screen_mod.ours(box[0], text), TOOK):
+            print(f'to "{name}": sent ({len(text)} chars)')
+            return
+    raise Refusal(f'"{name}": enter refused — the text stays in the input box as is')
+
+
+def own_resume(name, flags):
+    """An observer with a single bare -r is a revive after a reboot: the same conversation, flags and pult project from the list.
+    → (flags, project or None)."""
+    entry = roles.read_roster().get(name, {}).get('observer', {})
+    if flags not in (['-r'], ['--resume']) or not entry:
+        return flags, None
+    conversation = roles.resumable(entry)
+    resumed = roles.resume_args(entry.get('flags', []), conversation)
+    how = 'same conversation' if conversation else 'new conversation (the previous one was not recorded)'
+    print(f'claude-role: observer "{name}", {how}: {shlex.join(resumed)}', file = sys.stderr)
+    return resumed, entry.get('project')
+
+
+def revive(argv):
+    """The observer brings its executors up from the list: each in its pane, and with no pane in its tmux session
+    (no session: a new one), with the same conversation and earlier flags."""
+    me = os.environ.get('CLAUDE_ROLE_NAME')
+    if argv or os.environ.get('CLAUDE_ROLE') != 'observer' or not me:
+        raise Refusal('claude-role revive: from the observer session, without arguments')
+    team = roles.read_roster().get(me, {}).get('executors', {})
+    all_panes, tree, journal = panes(), processes(), roles.pult_journal()
+    for name, entry in team.items():
+        p = next((p for p in all_panes if p['@claude_role'] == 'executor' and p['@claude_name'] == name
+                  and p['@claude_observer'] == me), None)
+        if p and live(p, 'executor', tree):
+            print(f'"{name}": running, leaving it alone')
+            continue
+        if p and not roles.idle_shell(p):
+            print(f'"{name}": {p["pane_current_command"]} runs in pane {p["pane_id"]}, leaving it alone')
+            continue
+        if p:
+            entry = {**entry, 'flags': shlex.split(p['@claude_flags'])}
+        if journal:
+            project, why = roles.pult_project(journal, entry.get('session'), entry.get('cwd') or os.path.expanduser('~'),
+                                              entry.get('project'))
+            if why:
+                print(f'"{name}": not bringing up: {why}')
+                continue
+            entry = {**entry, 'project': project}
+        where = roles.relaunch('executor', name, me, entry, pane = p['pane_id'] if p else None)
+        result = 'revived' if roles.wait_live(where, 'executor') else f'did not start in {roles.STARTUP_LIMIT} s'
+        print(f'"{name}": {result}, session {entry.get("session")}, pane {where}, '
+              f'conversation {roles.resumable(entry) or "new (the previous one was not recorded)"}')
+    if not team:
+        print(f'no executors in the list of "{me}"')
+
+
+def pult_project(role, session, chosen):
+    """The pult project of a role session (no pult: None); SessionStart hands it there. Cannot be determined: the executor
+    is refused, the observer starts outside pult with one line why: it must be startable anywhere."""
+    journal = roles.pult_journal()
+    if not journal:
+        return None
+    project, why = roles.pult_project(journal, session, os.getcwd(), chosen)
+    if why and role == 'executor':
+        raise Refusal(f'session {session} cannot be handed to pult: {why}')
+    if why:
+        print(f'claude-role: observer session {session} is not handed to pult: {why}', file = sys.stderr)
+    return project
+
+
+MIN_PYTHON, MIN_TMUX = (3, 11), (3, 0)  # tomllib for the ratchets; pane options and -e on new-session
+
+
+def install_hint(linux, mac):
+    return mac if sys.platform == 'darwin' else linux
+
+
+def version(command, *args):
+    """The program's version as numbers (the first two numbers of its answer) or None if it is missing."""
+    if not shutil.which(command):
+        return None
+    out = subprocess.run([command, *args], capture_output = True, text = True).stdout
+    found = re.findall(r'\d+', out)
+    return tuple(int(n) for n in found[:2]) if found else ()
+
+
+def doctor_checks():
+    """-> [(ok?, what, what to do)] - self-check without a live claude: only what is visible on the machine."""
+    checks = []
+    def check(ok, what, todo = ''):
+        checks.append((bool(ok), what, todo))
+    check(True, f'platform: {platform.system()} {platform.release()}, processes: '
+                f'{"/proc" if roles.processes is roles._from_proc else "ps"}')
+    py = sys.version_info[:2]
+    check(py >= MIN_PYTHON, f'python3 {platform.python_version()} ({sys.executable})',
+          f'need >= {".".join(map(str, MIN_PYTHON))}: ' + install_hint('sudo dnf install python3.12 (or apt)',
+                                                                      'brew install python'))
+    tm = version('tmux', '-V')
+    check(tm and tm >= MIN_TMUX, f'tmux {".".join(map(str, tm)) if tm else "not found"}',
+          f'need >= {".".join(map(str, MIN_TMUX))}: ' + install_hint('sudo dnf install tmux (or apt)', 'brew install tmux'))
+    check(shutil.which('jq'), f'jq {"found" if shutil.which("jq") else "not found"} (needed by the kit hooks)',
+          install_hint('sudo dnf install jq (or apt)', 'brew install jq'))
+    check(shutil.which('claude'), f'claude {"found: " + shutil.which("claude") if shutil.which("claude") else "not found"}',
+          'install Claude Code: https://code.claude.com')
+    check(shutil.which('claude-role'), 'claude-role in PATH', 'run install.sh and add ~/.local/bin to PATH')
+    procs = roles.processes()
+    me = procs.get(os.getpid())
+    check(me and me[0] == os.getppid() and any('doctor' in a for a in me[1]),
+          f'process layer sees itself: {len(procs)} processes', 'processes are unreadable - send this output')
+    claude = roles.own_claude(procs)
+    check(True, f'own claude: PID {claude}' if claude else
+          'own claude not checked: not run from claude - in a claude session type: ! claude-role doctor')
+    pane = os.environ.get('TMUX_PANE')
+    if pane and claude:
+        mine = roles.find_pane(pane)
+        role = mine and mine['@claude_role']
+        if role:
+            check(roles.live(mine, role, procs), f'pane {pane}: {role} "{mine["@claude_name"]}" '
+                  f'seen alive', 'the @claude_pid label is not written yet - make any move in the session and repeat')
+    settings = os.path.join(roles.KIT, 'settings.json')
+    base = os.path.join(roles.KIT, 'settings.base.json')
+    try:
+        have = json.load(open(settings)).get('hooks', {})
+        need = json.load(open(base)).get('hooks', {})
+        commands = lambda groups: {h.get('command') for g in groups for h in g.get('hooks', [])}
+        missing = sorted(event for event, groups in need.items()
+                         if not commands(groups) <= commands(have.get(event, [])))
+        check(not missing, 'kit hooks in settings.json' + (f': missing in {", ".join(missing)}' if missing else ''),
+              f'move these events from {base} to {settings}')
+    except OSError as e:
+        check(False, f'settings.json is unreadable: {e}', 'run install.sh')
+    check(True, 'executor push silencer: ' + ('present' if os.path.exists(SILENCER) else
+                                                   'the first claude-role executor will create it'))
+    journal = roles.pult_journal() if shutil.which(roles.PULT) else None
+    check(True, f'pult: found, projects {len(journal[0])}' if journal else
+          'pult: not found - the kit works without it, sessions are not handed over to projects')
+    try:
+        os.makedirs(roles.STATE_DIR, exist_ok = True)
+        writable = os.access(roles.STATE_DIR, os.W_OK)
+    except OSError:
+        writable = False
+    check(writable, f'state directory {roles.STATE_DIR}', 'write access is required')
+    return checks
+
+
+def doctor(argv):
+    if argv:
+        raise Refusal('claude-role doctor takes no arguments')
+    checks = doctor_checks()
+    for ok, what, todo in checks:
+        print(f'{"ok " if ok else "no "}  {what}' + ('' if ok or not todo else f'  → {todo}'))
+    bad = sum(not ok for ok, *_ in checks)
+    print('all good' if not bad else f'problems: {bad}')
+    return 1 if bad else 0
+
+
+def main(argv):
+    if argv[:1] == ['doctor']:
+        return doctor(argv[1:])
+    if argv[:1] == ['press']:
+        return press(argv[1:])
+    if argv[:1] == ['revive']:
+        return revive(argv[1:])
+    if argv[:1] == ['tell']:
+        return tell(argv[1:])
+    for command in (status, last, send):
+        if argv[:1] == [command.__name__]:
+            return command(argv[1:])
+    role, name, options, flags = parse(argv)
+    if any(f in ('-n', '--name') or f.startswith('--name=') for f in flags):
+        raise Refusal('the session name is the role name, as the first argument: the observer and other sessions find it by that')
+    pane = os.environ.get('TMUX_PANE')
+    if not os.environ.get('TMUX') or not pane:
+        raise Refusal('outside tmux: roles live only in a tmux pane, start from a pane')
+    all_panes, tree = panes(), processes()
+    me = next(p for p in all_panes if p['pane_id'] == pane)
+    busy = next((r for r in ROLE_NAMES if live(me, r, tree)), None)
+    if busy:
+        raise Refusal(f'{ROLE_NAMES[busy]} "{me["@claude_name"]}" already runs in pane {pane}; its labels and list stay '
+                      f'untouched; a new role goes in its own tmux session')
+    env = dict(os.environ, CLAUDE_ROLE = role)
+    env.pop('CLAUDE_CODE_BRIDGE_SESSION_ID', None)  # remote control of the parent; the own Claude Code will set it itself
+    if role == 'observer':
+        name = name or me['session_name']
+        observer = None
+        flags, stored = own_resume(name, flags)
+        options['--project'] = options['--project'] or stored
+        env.pop('CLAUDE_CLIENT_PRESENCE_FILE', None)  # the observer sends pushes to the operator — the silencer is not inherited
+        claude_args = observer_args(flags, name)
+    else:
+        observer = pick_observer(all_panes, options['--to'], tree)
+        open(SILENCER, 'a').close()
+        env['CLAUDE_CLIENT_PRESENCE_FILE'] = SILENCER
+        claude_args = [NO_PUSH_TOOL, *flags]
+    refuse_duplicate(all_panes, pane, role, name, observer, tree)
+    project = pult_project(role, me['session_name'], options['--project'])
+    env['CLAUDE_ROLE_NAME'] = name
+    env[roles.ROLE_PID] = str(os.getpid())  # the exec below keeps the PID: this is the PID of the role's claude itself
+    env[roles.ROLE_FLAGS] = shlex.join(roles.resume_args(flags, None))  # without conversation and prompt — the revive will supply them
+    for var, value in ((roles.ROLE_OBSERVER, observer), (roles.ROLE_PROJECT, project)):
+        if value:
+            env[var] = value
+        else:
+            env.pop(var, None)
+    os.execvpe('claude', ['claude', '--name', name, *claude_args], env)
+
+
+def observer_args(flags, name):
+    """Claude flags of an observer: remote control on, named as the observer, unless the launch has it already or
+    opts out with --no-remote-control (a kit flag: it stays in the stored flags for the revive, claude never sees it)."""
+    if roles.NO_REMOTE_CONTROL in flags:
+        return [f for f in flags if f != roles.NO_REMOTE_CONTROL]
+    return flags if roles.has_remote_control(flags) else ['--remote-control', name, *flags]
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refusal as e:
+        sys.exit(f'claude-role: {e}')
