@@ -426,7 +426,7 @@ class RoleIntro(unittest.TestCase):
         return json.loads(out)['hookSpecificOutput']['additionalContext'] if out else ''
 
     def test_an_executor_gets_the_chat_rule(self):
-        self.assertIn('Chat: English and terse; choice windows in the operator\'s language', self.line('executor'))
+        self.assertIn('Chat and choice windows: English and terse', self.line('executor'))
 
     def test_an_observer_gets_none_of_it_and_no_role_is_silent(self):
         self.assertNotIn('Chat:', self.line('observer'))

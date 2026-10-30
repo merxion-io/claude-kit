@@ -14,7 +14,7 @@ if role:
     if session == 'observer':  # after compaction deferred tool schemas are gone: the first push would fail
         line += ' And load the push tool right away: ToolSearch("select:PushNotification").'
     if session == 'executor':
-        line += (" Chat: English and terse; choice windows in the operator's language; a message with no relay label is the"
+        line += (" Chat and choice windows: English and terse; a message with no relay label is the"
                  " operator: answer them by CLAUDE.md. Commits and project documents keep the project's language.")
     print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': line}},
                      ensure_ascii = False))
