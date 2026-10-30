@@ -139,4 +139,6 @@ them); startup and /clear start empty.
 
 The table is the project's: `<project>/.claude/kit-gates.json`; no table, no gates. Its key "open" (a list of paths, a trailing `/` = a folder at any depth) adds to the write guard's open list.
 
+A bash gate belongs to the project where the command acts: per command of a line, the directory after a literal `cd` and git's `-C`; an unknowable place counts as the session's cwd. Tool and write gates use the session's cwd.
+
 Subagents, observers and sessions without a role are never touched.

@@ -1,6 +1,6 @@
 # An executor keeps to its project's gates: an action of the project's table (commit, spec write, build, full test run,
-# Agent…) is denied while one of its skills was never loaded. The table is <project>/.claude/kit-gates.json up from cwd;
-# none → no gates. Kept per executor (observer and name): the skills its main session has loaded — at any time in this
+# Agent…) is denied while one of its skills was never loaded. The table is <project>/.claude/kit-gates.json up from cwd,
+# for a Bash command up from the directory it acts in; none → no gates. Kept per executor (observer and name): the skills its main session has loaded — at any time in this
 # conversation; compaction and resume keep them (re-injected), startup and /clear start empty.
 # Subagents (payload agent_id) are never touched; the observer is not either (the caller passes executors only).
 import json, os, re
@@ -48,22 +48,30 @@ def in_dirs(path, cwd, dirs):
 
 
 def gate_hits(gate, ev):
-    """The tool call is the gate's action: "tool" — tool names; "bash" — a regex over the command (heredoc bodies and
-    quoted text removed); "write" — dirs it writes under (git apply and patch count whatever the path)."""
-    tool, inp, cwd = ev.get('tool_name'), ev.get('tool_input') or {}, ev.get('cwd') or os.getcwd()
+    """The tool call is the gate's action: "tool" — tool names; "write" — dirs it writes under (git apply and patch count whatever the path)."""
+    tool, cwd = ev.get('tool_name'), ev.get('cwd') or os.getcwd()
     if tool in gate.get('tool', []):
-        return True
-    if tool == 'Bash' and gate.get('bash') and re.search(gate['bash'], write_guard.split_shell(inp.get('command') or '')[2], re.M):
         return True
     return bool(gate.get('write')) and any(t.whole_tree or in_dirs(t.path, cwd, gate['write']) for t in write_guard.write_targets(ev))
 
 
-def denied(ev, mark, table):
+def hit_gates(ev):
+    """The gates this call is the action of: tool and write gates of the session's table; "bash" gates, a regex over one
+    command (no quoted text), of the table of the directory that command acts in."""
+    cwd = ev.get('cwd') or os.getcwd()
+    yield from (gate for gate in write_guard.project_table(cwd).get('gates', []) if gate_hits(gate, ev))
+    if ev.get('tool_name') == 'Bash':
+        for place, words in write_guard.acting_commands((ev.get('tool_input') or {}).get('command') or '', cwd):
+            yield from (gate for gate in write_guard.project_table(place).get('gates', [])
+                        if gate.get('bash') and re.search(gate['bash'], words, re.M))
+
+
+def denied(ev, mark):
     """PreToolUse of the main session → the reason of a deny, or None."""
     loaded = set(mark['skills'])
-    for gate in table.get('gates', []):
+    for gate in hit_gates(ev):
         missing = [s for s in gate.get('skills', []) if s not in loaded]
-        if missing and gate_hits(gate, ev):
+        if missing:
             return (f'{gate.get("action", "this action")}: load {", ".join(f"`{s}`" for s in missing)} first (Skill tool) — '
                     'it was never loaded in this session; then repeat the call.')
     return None
@@ -84,6 +92,6 @@ def hold(ev, observer, name):
         mark['skills'].append(skill)
         write_mark(path, mark)
     if event == 'PreToolUse':
-        why = denied(ev, mark, write_guard.project_table(ev.get('cwd') or os.getcwd()))
+        why = denied(ev, mark)
         return why and {'hookEventName': event, 'permissionDecision': 'deny', 'permissionDecisionReason': why}
     return None

@@ -515,6 +515,56 @@ class SkillGates(Base):
             f.write('x')
         self.assertIsNone(self.e.post_bash('x', 'g'))
 
+    def test_a_bash_gate_holds_where_the_command_acts(self):
+        a, b = self.top, temp_repo()
+        for command in ('git commit -m x', f'(cd {b} && git commit -m x); git commit -m y', f'cd {b}; cd {a}; git commit -m x',
+                        'cd "$X" && git commit -m x', 'git -C "$X" commit -m x', f'git -C {b} -C {a} commit -m x'):
+            with self.subTest(command = command):
+                self.assertDenied(self.e.pre_bash(command), '`facts`')
+        for command in (f'git -C {b} commit -m x', f'git -C "{b}" commit -m x', f'cd {b} && git commit -m x', f'sudo git -C {b} commit -m x',
+                        f'(cd {b} && git commit -m x)', f'pushd {b} && git commit -m x'):
+            with self.subTest(command = command):
+                self.assertIsNone(self.e.pre_bash(command))
+        outside = Session(b)
+        for command in (f'git -C {a} commit -m x', f'cd {a} && git commit -m x', f'sudo git -C {a} commit -m x', f'git -c a=b -C {a} commit -m x'):
+            with self.subTest(command = command):
+                self.assertDenied(outside.pre_bash(command), '`facts`')
+        self.assertIsNone(outside.pre_bash('git commit -m x'))
+        self.assertIsNone(outside.pre_bash(f'git -C {a} status; git commit -m x'))
+
+    def test_quoted_text_neither_moves_nor_hits(self):
+        b = temp_repo()
+        for command in (f'git -C {self.top} log --grep "git commit"', f'echo "cd {b}" && echo "git commit"', "echo 'git commit'", 'echo "git commit" \'x'):
+            with self.subTest(command = command):
+                self.assertIsNone(self.e.pre_bash(command))
+        self.assertDenied(self.e.pre_bash(f'echo "cd {b}"; git commit -m "(cd {b})"'))
+
+    def test_tool_and_write_gates_keep_the_table_of_the_session(self):
+        outside = Session(temp_repo())
+        self.assertIsNone(outside.pre_bash(f'cd {self.top} && echo x > specs-folder/a.md'))
+        self.assertIsNone(outside.write(self.path('specs-folder/a.md')))
+        self.assertIsNone(outside.hook(hook_event_name = 'PreToolUse', tool_name = 'Agent', tool_input = {}))
+        self.assertDenied(self.e.pre_bash(f'cd {outside.cwd}; echo x > {self.path("specs-folder/a.md")}'), '`spec-change`')
+
+    def test_an_anchored_regex_sees_each_command_alone(self):
+        with open(self.path('.claude/kit-gates.json'), 'w') as f:
+            json.dump({'gates': [{'action': 'the full suite', 'bash': r'(^|[;&|]\s*)pytest(\s+-\S+)*\s*($|[;&|])', 'skills': ['run']}]}, f)
+        for command in ('pytest -q', 'cd x && pytest', 'pytest -q | tail -5', 'pytest -q 2>&1 | tail -5', 'ls; pytest'):
+            with self.subTest(command = command):
+                self.assertDenied(self.e.pre_bash(command), '`run`')
+        for command in ('pytest tests/a.py', 'pytest -q "tests/a.py"', 'echo "pytest"', f'cd {temp_repo()} && pytest'):
+            with self.subTest(command = command):
+                self.assertIsNone(self.e.pre_bash(command))
+
+    def test_a_broken_table_where_the_command_acts_stays_open(self):
+        b = temp_repo()
+        os.makedirs(os.path.join(b, '.claude'))
+        for table in ('[]', '{"gates": ["x"]}', '{"gates": [{"bash": "(", "skills": ["x"]}]}'):
+            with self.subTest(table = table):
+                with open(os.path.join(b, '.claude/kit-gates.json'), 'w') as f:
+                    f.write(table)
+                self.assertIsNone(self.e.pre_bash(f'git -C {b} commit -m x'))
+
 
 if __name__ == '__main__':
     unittest.main()

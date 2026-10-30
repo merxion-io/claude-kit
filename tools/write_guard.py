@@ -18,7 +18,9 @@ WRITE_REDIRECTS = ('>', '>>', '>|', '&>', '&>>', '<>', '>&')
 READ_REDIRECTS = ('<', '<<', '<<<', '<&')
 SHLEX_PUNCTUATION = set('();<>|&')
 MASK = str.maketrans({c: chr(0xE000 + i) for i, c in enumerate(sorted(SHLEX_PUNCTUATION | set('[]')))})  # '[' too: quoted text opens no [[ ]]
-UNMASK = {v: chr(k) for k, v in MASK.items()}
+QUOTE_OPEN, QUOTE_CLOSE = '\uE100', '\uE101'  # around the body of quoted text while the line is lexed: it survives inside the word
+UNMASK = {**{v: chr(k) for k, v in MASK.items()}, QUOTE_OPEN: '', QUOTE_CLOSE: ''}
+QUOTED = re.compile(f'{QUOTE_OPEN}[^{QUOTE_CLOSE}]*(?:{QUOTE_CLOSE}|$)')
 TEXT_OR_COMMENT = re.compile(r"""\\.|'[^']*'|"(?:[^"\\]|\\.)*"|(?:^|(?<=\s))#[^\n]*""", re.S | re.M)
 _ONE_DEEP = r'(?:[^()]|\([^()]*\))*'  # deeper parens match nothing: read as shell, they hide no command
 COMPARISON = re.compile(rf'\(\({_ONE_DEEP}\)\)|\[\[\s{_ONE_DEEP}?\s\]\]')  # (( x > 3 )), $(( 3 > 2 )), [[ a > b ]]: a '>' here redirects nothing
@@ -47,7 +49,7 @@ CODE_WRITES = [re.compile(p) for p in (  # the real target of a write call, not 
     rf"""\bFile\.write\(\s*{_TEXT}""",
 )]
 
-Segment = namedtuple('Segment', 'args outs')
+Segment = namedtuple('Segment', 'args outs bare')  # bare: args, word for word, with quoted text as ""
 Target = namedtuple('Target', 'shown path whole_tree')  # path None: not known from the text; whole_tree: git apply, patch
 
 
@@ -56,7 +58,7 @@ def session_key(observer, name):
 
 
 def split_shell(command):
-    """Bash line → (commands: Segment, '(' or ')'; heredoc bodies; the line without heredoc bodies and quoted text)."""
+    """Bash line → (commands: Segment, '(' or ')'; heredoc bodies)."""
     bodies = []
 
     def cut(m):
@@ -64,7 +66,12 @@ def split_shell(command):
         return m.group(2) + ' ; '
 
     def mask(m):
-        return '' if m.group().startswith('#') else m.group().translate(MASK)
+        text = m.group()
+        if text.startswith('#'):
+            return ''
+        if text[0] in '\'"' and len(text) > 2:
+            text = f'{text[0]}{QUOTE_OPEN}{text[1:-1]}{QUOTE_CLOSE}{text[-1]}'
+        return text.translate(MASK)
     shell = HEREDOC.sub(cut, command)
 
     def comparison(m):
@@ -76,27 +83,30 @@ def split_shell(command):
         words = list(lex)
     except ValueError:
         words = masked.split()
-    items, args, outs, redirect = [], [], [], None
+    def plain(word):
+        return ''.join(UNMASK.get(c, c) for c in word)
+    items, args, outs, bare, redirect = [], [], [], [], None
     for word in words + [';']:
         for part in OPERATORS.findall(word) if set(word) <= SHLEX_PUNCTUATION else [word]:
             if part in WRITE_REDIRECTS or part in READ_REDIRECTS:
                 if args and args[-1].isdigit():
                     args.pop()  # the descriptor of 2> or 2>&1
+                    bare.pop()
                 redirect = part
             elif set(part) <= SHLEX_PUNCTUATION:
-                items.append(Segment(args, outs))
-                args, outs, redirect = [], [], None
+                items.append(Segment(args, outs, bare))
+                args, outs, bare, redirect = [], [], [], None
                 if part in '()':
                     items.append(part)
             else:
-                text = ''.join(UNMASK.get(c, c) for c in part)
+                text = plain(part)
                 if redirect is None:
                     args.append(text)
+                    bare.append(plain(QUOTED.sub('""', part)))
                 elif redirect in WRITE_REDIRECTS and not (redirect == '>&' and re.fullmatch(r'\d+|-', text)):
                     outs.append(text)
                 redirect = None
-    bare = re.sub(r'"[^"]*"', '""', re.sub(r"'[^']*'", "''", shell))
-    return items, bodies, bare
+    return items, bodies
 
 
 def command_words(args):
@@ -168,13 +178,19 @@ def in_place_files(args):
     return files if scripted else files[1:]
 
 
-def git_targets(args, here):
-    """git itself stays open; only `git [-C dir] apply` writes."""
+def git_call(args, here):
+    """git's words → those after its global options, and the directory its -C leaves."""
     rest = args[1:]
     while rest and rest[0].startswith('-'):
         if rest[0] == '-C' and len(rest) > 1:
             here = at(here, rest[1])
         rest = rest[2:] if rest[0] in ('-C', '-c') else rest[1:]
+    return rest, here
+
+
+def git_targets(args, here):
+    """git itself stays open; only `git [-C dir] apply` writes."""
+    rest, here = git_call(args, here)
     if rest[:1] == ['apply'] and not set(rest) & set(GIT_READ_ONLY_APPLY):
         return [Target('git apply', here, True)]
     return []
@@ -228,17 +244,16 @@ def segment_targets(args, here, bodies):
     return []
 
 
-def bash_targets(command, cwd):
-    """All a Bash line writes, as far as the text tells, following a literal `cd` across segments and subshells."""
-    items, bodies, _ = split_shell(command)
-    found, here, outer, dirs = [], cwd, [], []
+def placed_segments(items, cwd):
+    """The segments of a split line, each with the directory it starts in: a literal `cd` followed across segments and subshells."""
+    here, outer, dirs = cwd, [], []
     for item in items:
         if item == '(':
             outer.append((here, list(dirs)))
         elif item == ')':
             here, dirs = outer.pop() if outer else (here, dirs)
         else:
-            found += [Target(out, at(here, out), False) for out in item.outs]
+            yield item, here
             args = command_words(item.args)
             if args[:1] == ['cd']:
                 here = moved(here, args[1:])
@@ -247,9 +262,30 @@ def bash_targets(command, cwd):
                 here = moved(here, args[1:])
             elif args[:1] == ['popd']:
                 here = dirs.pop() if dirs else here  # an empty stack: popd fails, the directory stays
-            elif args:
-                found += segment_targets(args, here, bodies)
+
+
+def bash_targets(command, cwd):
+    """All a Bash line writes, as far as the text tells."""
+    items, bodies = split_shell(command)
+    found = []
+    for item, here in placed_segments(items, cwd):
+        found += [Target(out, at(here, out), False) for out in item.outs]
+        args = command_words(item.args)
+        if args and args[0] not in ('cd', 'pushd', 'popd'):
+            found += segment_targets(args, here, bodies)
     return found
+
+
+def acting_commands(command, cwd):
+    """A Bash line → (the directory each command acts in, its words without quoted text and git's global options).
+    An unknowable directory is cwd."""
+    for item, here in placed_segments(split_shell(command)[0], cwd):
+        args, bare = command_words(item.args), item.bare
+        if args and os.path.basename(args[0]) == 'git':
+            rest, here = git_call(args, here)
+            bare = bare[:len(item.args) - len(args) + 1] + bare[len(item.args) - len(rest):]
+        if bare:
+            yield here or cwd, ' '.join(bare)
 
 
 def write_targets(ev):
