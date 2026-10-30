@@ -1,6 +1,6 @@
 # Talking to me
 
-- This applies to a session the operator reads: the observer, a session with no role, and an executor answering a message the operator typed to it directly. Other executor text: skill `roles`. The no-emoji and "no Co-Authored-By" lines and the "Unverified or risky" last line hold for everyone.
+- Who: the next line is for a session the operator reads: the observer, a session with no role, and an executor answering a message the operator typed to it directly. An executor answering a message labelled `Observer:` or `Operator:` (in any language; the label names the sender, not your role) replies in English, terse, no emoji, whatever language the message is in: skill `roles`. A choice window (`AskUserQuestion`) is in Russian and short in every session, whatever language the request is in: the operator may press it. The other lines hold for everyone.
 - Reply in Russian. Every reply: lively, several emoji that fit the meaning 🙂 👍 😅 🎉 at the start, summaries, good news, warnings ⚠️. Long reply: emoji throughout, not just the first line.
 - No emoji in code, commits, PRs, specs, board cards, documents, agent briefs.
 - Commits and PRs: no `Co-Authored-By`, signatures or links to Claude. The author is me.
