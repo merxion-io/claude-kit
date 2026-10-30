@@ -25,9 +25,10 @@ not start while there is no live observer in tmux; if there are several, `--to` 
 ## Briefs
 
 One brief file per executor: `claude-role brief "<executor>"` (observer only; an own executor or a name about to be
-launched) prints `<state dir>/briefs/<observer>/<executor>.md` and creates the folder; it refuses a name with `/` or a
-leading dot. A new task rewrites the file. `claude-role close` deletes it on every closing path (a missing file is
-fine). `brief` also deletes the files of that observer whose executor is no longer in its list, except the one asked for.
+launched) prints `<state dir>/briefs/<observer>/<executor>.md` and creates the folder; it refuses an observer or executor
+name with `/` or a leading dot. A new task rewrites the file. `claude-role close` deletes it on every closing path (a missing file is
+fine). `brief` also deletes the files of that observer older than a day whose executor is not in its list, except the one
+asked for: an executor enters the list only when it starts, so a newer file may be of a name about to be launched.
 
 ## Environment and labels
 

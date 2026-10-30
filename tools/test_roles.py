@@ -253,9 +253,26 @@ class CloseLive(unittest.TestCase):
         for file in (*mine.values(), other):
             with open(file, 'w') as f:
                 f.write('task')
+        os.utime(mine['gone'], (1, 1))
+        os.utime(other, (1, 1))
         self.assertEqual(self.role('brief', 'next')[0], 0)
         self.assertEqual({n: os.path.exists(f) for n, f in mine.items()}, {'e': True, 'gone': False, 'next': True})
         self.assertTrue(os.path.exists(other))
+
+    def test_brief_keeps_the_fresh_file_of_a_name_not_launched_yet(self):
+        code, out = self.role('brief', 'first')
+        with open(out.strip(), 'w') as f:
+            f.write('task')
+        self.assertEqual(self.role('brief', 'second')[0], 0)
+        self.assertTrue(os.path.exists(out.strip()))
+
+    def test_brief_refuses_an_observer_name_that_leaves_the_briefs_folder(self):
+        precious = f'{self.state}/precious.md'
+        with open(precious, 'w') as f:
+            f.write('keep')
+        out = subprocess.run([sys.executable, os.path.join(KIT, 'bin/claude-role'), 'brief', 'e'],
+                             env = {**self.observer, 'CLAUDE_ROLE_NAME': '..'}, capture_output = True, text = True)
+        self.assertEqual((out.returncode, os.path.exists(precious)), (1, True), out.stdout + out.stderr)
 
     def test_brief_is_for_an_observer_only(self):
         out = subprocess.run([sys.executable, os.path.join(KIT, 'bin/claude-role'), 'brief', 'e'], env = self.env,

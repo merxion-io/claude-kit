@@ -15,6 +15,7 @@ STATE_DIR = os.environ.get(STATE_DIR_VAR) or os.path.join(KIT, 'state')
 ROSTER = os.path.join(STATE_DIR, 'roles.json')
 REVIVE_LOCK = os.path.join(STATE_DIR, 'revive.lock')
 BRIEFS = os.path.join(STATE_DIR, 'briefs')  # <observer>/<executor>.md: the one brief file of each executor
+BRIEF_GRACE = 86400  # seconds: an executor enters the list only at its SessionStart; a newer file may be of a name about to be launched
 LAUNCHER = os.path.join(KIT, 'bin', 'claude-role')
 PID_LABEL = '@claude_pid'  # PID of the role's claude in the pane — written by its hook
 PANE_FIELDS = ('pane_id', 'session_name', 'pane_pid', 'pane_current_command', '@claude_role', '@claude_name',
@@ -315,8 +316,9 @@ def _still_there(entry, role, observer, name, by_pane, started):
 
 def brief_path(observer, executor):
     """The one brief file of an executor of this observer; a name with "/" or a leading dot is no file name here."""
-    if not executor.strip() or '/' in executor or executor.startswith('.'):
-        raise ValueError(f'executor name "{executor}": no "/", no leading dot')
+    for name in (observer, executor):
+        if not name.strip() or '/' in name or name.startswith('.'):
+            raise ValueError(f'name "{name}": no "/", no leading dot')
     return os.path.join(BRIEFS, observer, executor + '.md')
 
 
@@ -326,12 +328,13 @@ def drop_brief(observer, executor):
 
 
 def sweep_briefs(observer, keep):
-    """Deletes the brief files of this observer whose executor is not in its roster, except `keep`."""
+    """Deletes the brief files of this observer older than BRIEF_GRACE whose executor is not in its roster, except `keep`."""
     team = set(read_roster().get(observer, {}).get('executors', {})) | {keep}
     for path in glob.glob(os.path.join(glob.escape(BRIEFS), glob.escape(observer), '*.md')):
         if os.path.basename(path)[:-3] not in team:
             with contextlib.suppress(FileNotFoundError):
-                os.remove(path)
+                if time.time() - os.path.getmtime(path) > BRIEF_GRACE:
+                    os.remove(path)
 
 
 def update_roster(observer = None, role = None, name = None, fields = None):
