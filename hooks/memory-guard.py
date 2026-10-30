@@ -16,7 +16,7 @@ if re.search(r'/\.claude/projects/[^/]+/memory/', path):
 elif name == 'CLAUDE.md':
     lines = sum(1 for _ in open(path, errors='ignore'))
     if lines > 100:
-        print(f'CLAUDE.md guard: {path} = {lines} lines (operator rule: at most 100). CLAUDE.md holds only rules and links to skills; procedures, measurements and history go to skills in .claude/skills/ or to the project's spec (its CLAUDE.md names where). Compress now.', file=sys.stderr); sys.exit(2)
+        print(f'CLAUDE.md guard: {path} = {lines} lines (operator rule: at most 100). CLAUDE.md holds only rules and links to skills; procedures, measurements and history go to skills in .claude/skills/ or to the spec of the project (its CLAUDE.md names where). Compress now.', file=sys.stderr); sys.exit(2)
 elif '/.claude/skills/' in path and path.endswith('.md'):
     limit = SKILL if name == 'SKILL.md' else REF if '/references/' in path else 0
     if limit and size > limit:

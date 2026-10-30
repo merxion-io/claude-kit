@@ -20,7 +20,7 @@ cp_file=""; [ -n "$sess" ] && cp_file="$dir/$sess-session.md"
 # manual agent notes (`<sess>-<topic>.md`) — paths only: the agent writes them, and they hold decisions that may be missing from the digest
 manual="$(ls -t "$dir/$sess"-*.md 2>/dev/null | grep -v -- '-session\.md$' | head -5 | tr '\n' ' ')"
 
-base='The context was just compacted. Treat the summary as incomplete: restore the working state from durable sources and continue the interrupted task (git status --short: uncommitted; the project's spec (its CLAUDE.md names where): the truth about behaviour). The checkpoint is written by another model from a digest: check each "done" in it against the files and git before relying on it.'
+base='The context was just compacted. Treat the summary as incomplete: restore the working state from durable sources and continue the interrupted task (git status --short: uncommitted; the spec of the project (its CLAUDE.md names where): the truth about behaviour). The checkpoint is written by another model from a digest: check each "done" in it against the files and git before relying on it.'
 [ -n "$sess" ] && [ -n "$manual" ] && base="$base Manual notes of this session, read them: $manual"
 if [ -n "$cp_file" ] && [ -s "$cp_file" ]; then
   ctx="$base
