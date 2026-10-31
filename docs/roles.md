@@ -17,6 +17,18 @@ The rules of a role are `roles/observer.md` and `roles/executor.md`. `hooks/role
 whole text into its context on every SessionStart (start, resume, /clear, compaction): a request to load a skill was not
 reliable. A hook's context is limited to 10000 chars, so `claude-role doctor` reports a text that grows over it.
 
+## How text reaches a session
+
+Four ways, each with its own holder:
+
+- Always in context: `CLAUDE.md`.
+- By role: the SessionStart hook puts the whole `roles/<role>.md` into context. A hook's context is limited to 10000 chars,
+  `tools/kit_check.py` holds it. The observer's main session may load only the skills of `OBSERVER_SKILLS` (`tools/roles.py`).
+- Subagent preload: the `skills:` key of an agent's frontmatter.
+- Before an action: a project gate, `.claude/kit-gates.json` of the project (see [Skill gates](#skill-gates)).
+
+Everything else: the model calls a skill by its description.
+
 ## Launch
 
 Any `claude` flags (`-r`, `--model`, `--remote-control "<name>"`) pass straight through. An observer starts with remote
