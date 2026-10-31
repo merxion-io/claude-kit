@@ -22,8 +22,8 @@ reliable. A hook's context is limited to 10000 chars, so `claude-role doctor` re
 Four ways, each with its own holder:
 
 - Always in context: `CLAUDE.md`.
-- By role: the SessionStart hook puts the whole `roles/<role>.md` into context. A hook's context is limited to 10000 chars,
-  `tools/kit_check.py` holds it. The observer's main session may load only the skills of `OBSERVER_SKILLS` (`tools/roles.py`).
+- By role: the SessionStart hook puts the whole `roles/<role>.md` into context (see [Role text](#role-text); the observer's
+  skills are limited, see [Guards on the observer](#guards-on-the-observer)).
 - Subagent preload: the `skills:` key of an agent's frontmatter.
 - Before an action: a project gate, `.claude/kit-gates.json` of the project (see [Skill gates](#skill-gates)).
 
