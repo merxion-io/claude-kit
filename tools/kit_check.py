@@ -6,7 +6,7 @@
 import glob, json, os, re, shlex, subprocess
 
 import roles
-from write_guard import PROJECT_GATES
+from write_guard import project_table_path
 
 KIT_PREFIX = re.compile(r'^(?:\$HOME|\$\{HOME\}|~)/\.claude(?=/)')
 
@@ -36,9 +36,9 @@ def agent_skills(root, cwd):
 
 
 def gate_skills(root, cwd):
-    """A gate may name a kit skill or one of the project's own; a table is checked only when it sits in cwd."""
-    path = os.path.join(cwd, PROJECT_GATES)
-    if not os.path.exists(path):
+    """A gate may name a kit skill or one of the project's own; the table is the one up from cwd."""
+    path = project_table_path(cwd)
+    if not path:
         return []
     try:
         with open(path, encoding = 'utf-8') as f:
@@ -47,7 +47,7 @@ def gate_skills(root, cwd):
     except (OSError, ValueError, AttributeError, TypeError) as e:
         return [(f'{path} is unreadable: {e}', 'fix the table: {"gates": [{"skills": [...]}]}')]
     return [(f'{path} names skill {name}: not in the kit or the project', f'add skill {name} or fix the table')
-            for name in names if not any(os.path.isfile(skill_file(home, name)) for home in (root, os.path.join(cwd, '.claude')))]
+            for name in names if not any(os.path.isfile(skill_file(home, name)) for home in (root, os.path.dirname(path)))]
 
 
 def role_texts(root, cwd):

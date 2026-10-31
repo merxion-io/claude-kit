@@ -333,20 +333,28 @@ def repo_of(path):
     return os.path.realpath(os.fsdecode(top).rstrip('\n')) if top else None
 
 
-def project_table(cwd):
-    """The project's table: <project>/.claude/kit-gates.json up from cwd; none → {}."""
+def project_table_path(cwd):
+    """The path of the project's table: <project>/.claude/kit-gates.json up from cwd; none → None."""
     here = os.path.abspath(cwd)
     while True:
         path = os.path.join(here, PROJECT_GATES)
         if os.path.exists(path):
-            try:
-                with open(path, encoding = 'utf-8') as f:
-                    return json.load(f)
-            except (OSError, ValueError):
-                return {}
+            return path
         if os.path.dirname(here) == here:
-            return {}
+            return None
         here = os.path.dirname(here)
+
+
+def project_table(cwd):
+    """The project's table up from cwd; none or broken → {}."""
+    path = project_table_path(cwd)
+    if not path:
+        return {}
+    try:
+        with open(path, encoding = 'utf-8') as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
 
 
 def open_entries(top):

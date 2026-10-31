@@ -80,11 +80,13 @@ class Fixture(unittest.TestCase):
         self.assertEqual(len(found), 1, found)
         self.assertIn('names skill gone', found[0])
 
-    def test_a_table_above_cwd_is_not_read(self):
-        self.gates(json.dumps({'gates': [{'skills': ['gone']}]}))
-        self.cwd = os.path.join(self.cwd, 'deeper')
+    def test_a_table_above_cwd_is_found_with_the_skills_of_its_project(self):
+        self.write('project/.claude/skills/own/SKILL.md', 'x\n')
+        self.gates(json.dumps({'gates': [{'skills': ['known', 'own']}, {'skills': ['gone']}]}))
+        table = os.path.join(self.cwd, '.claude', 'kit-gates.json')
+        self.cwd = os.path.join(self.cwd, 'deeper', 'still')
         os.makedirs(self.cwd)
-        self.assertEqual(self.found(), [])
+        self.assertEqual(self.found(), [f'{table} names skill gone: not in the kit or the project'])
 
     def test_a_broken_gate_table_is_a_finding(self):
         for text in ('{', '[]', '{"gates": ["x"]}', '{"gates": 1}'):
