@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # install.sh into a temp target: python3 tools/test_install.py. Adds what the kit lacks there, leaves the rest alone.
-import json, os, subprocess, sys, tempfile, unittest
+import json, os, shutil, subprocess, sys, tempfile, unittest
 
 KIT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 ROLE_STATE = 'python3 "$HOME/.claude/hooks/role-state.py"'
@@ -38,6 +38,20 @@ class Install(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.target, 'roles', 'executor.md')))
         self.assertFalse(os.path.exists(os.path.join(self.target, 'gates')))
         self.assertEqual(self.commands('SubagentStop'), [ROLE_STATE])
+
+    def test_install_into_a_clean_checkout_leaves_git_status_empty(self):
+        clone = tempfile.mkdtemp()
+        tracked = subprocess.run(['git', 'ls-files', '-z'], cwd = KIT, capture_output = True, text = True, check = True).stdout.split('\0')[:-1]
+        for name in tracked:  # the working tree, modes included
+            if os.path.exists(os.path.join(KIT, name)):
+                os.makedirs(os.path.dirname(os.path.join(clone, name)), exist_ok = True)
+                shutil.copy2(os.path.join(KIT, name), os.path.join(clone, name))
+        git = lambda *args: subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', *args], cwd = clone, capture_output = True, text = True, check = True).stdout
+        git('init', '-q'); git('config', 'core.hooksPath', '/dev/null'); git('add', '-A'); git('commit', '-q', '-m', 'x')
+        env = {**os.environ, 'CLAUDE_HOME': clone, 'XDG_BIN_HOME': self.bin}
+        done = subprocess.run(['bash', os.path.join(clone, 'install.sh')], env = env, capture_output = True, text = True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(git('status', '--porcelain', '--untracked-files=no'), '')
 
     def test_a_fresh_install_passes_its_own_self_check(self):
         self.install()

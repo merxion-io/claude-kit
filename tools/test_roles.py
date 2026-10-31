@@ -540,11 +540,13 @@ class CompactResume(unittest.TestCase):
         return json.loads(out)['hookSpecificOutput']['additionalContext']
 
     def test_a_long_checkpoint_is_cut_under_the_limit_and_names_its_file(self):
-        for filler in ('x' * 20000, 'a "quoted" line\n' * 1250, chr(0x436) * 20000):  # escapes count in the output; a character is one
+        for filler in ('x' * 20000, 'a "quoted" line\n' * 1250, chr(0x436) * 20000, chr(0x1F600) * 20000):  # escapes count in the output; a character is one unit, an emoji two
             with self.subTest(filler = filler[:16]):
                 out = self.output(filler)
-                self.assertLess(len(out), roles.CONTEXT_LIMIT)
-                self.assertGreater(len(out), roles.CONTEXT_LIMIT - 100)
+                units = lambda text: len(text.encode('utf-16-le')) // 2
+                self.assertLess(units(out), roles.CONTEXT_LIMIT)
+                self.assertGreater(units(out), roles.CONTEXT_LIMIT - 100)
+                self.assertLessEqual(units(self.context(out)), roles.CONTEXT_LIMIT)
                 self.assertEqual(self.context(out).splitlines()[-1], f'--- checkpoint cut here, the rest is in {self.file} ---')
 
     def test_a_short_checkpoint_arrives_whole(self):

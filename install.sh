@@ -46,7 +46,11 @@ print('settings.json: ' + ('; '.join(said) or 'all keys and hooks already presen
 if malformed: print(f'settings.json: {", ".join(malformed)} - wrong format, left untouched, kit hooks not added there: fix it and run again')
 PY
 
-chmod +x "$TARGET"/bin/* "$TARGET"/hooks/*.sh "$TARGET"/tools/quality/*.py 2>/dev/null || true
+chmod +x "$TARGET"/bin/* "$TARGET"/hooks/*.sh 2>/dev/null || true
+# Only the scripts run directly (a shebang) get +x; an imported module (polyglot.py) keeps its mode, or the clone shows it modified
+for tool in "$TARGET"/tools/quality/*.py; do
+  if [ "$(head -c 2 "$tool" 2>/dev/null)" = '#!' ]; then chmod +x "$tool"; fi
+done
 
 # Kit commands (bin/) — as links into the personal PATH: a kit update picks them up at once
 BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
