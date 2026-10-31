@@ -19,7 +19,7 @@ exception, but to take it to the end on one concrete case.
   burn tokens. Separately — when a task may be considered closed: only when all items are done.
 - `spec-first` — for projects where behaviour is written into a spec first: proposal → code → merge → archive,
   removing a mechanism with a check that it does not come back.
-- `checkpoint`, `compact-now` — save the session state before context compaction.
+- `checkpoint` — save the session state before context compaction; also reports how full the context is.
 - `artifact-location` — where to put HTML reports and pages.
 - `firecrawl` — fetch a page when an ordinary request gets 403 or an empty response.
 

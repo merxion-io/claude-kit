@@ -7,8 +7,6 @@ sys.path.insert(0, os.path.join(KIT, 'tools'))
 import kit_check
 import roles
 
-# Dead hooks a later change deletes; that change empties this and then removes it.
-EXPECTED_DEAD = ['hooks/watch-ensure.sh', 'hooks/context-guard.sh']
 LIVE = 'bash "$HOME/.claude/hooks/live.sh"'
 FOREIGN = 'python3 /opt/my/own-hook.py'
 
@@ -20,7 +18,7 @@ def hooks_of(*commands):
 class Tree(unittest.TestCase):
     def test_the_kit_agrees_with_itself(self):
         found = [what for what, _ in kit_check.tree_findings(KIT, tempfile.gettempdir())]
-        self.assertEqual(sorted(w.split(':')[0] for w in found), sorted(EXPECTED_DEAD), found)
+        self.assertEqual(found, [])
 
 
 class Fixture(unittest.TestCase):

@@ -1,6 +1,6 @@
 ---
 name: checkpoint
-description: "Write a durable session checkpoint (task, decisions, state, next step, uncommitted work, anchors) to a file so nothing is lost on context compaction or a new session. Use proactively when context gets heavy or before a long/risky operation, and on request. Triggers: checkpoint, save state, save point."
+description: "Write a durable session checkpoint (task, decisions, state, next step, uncommitted work, anchors) to a file so nothing is lost on context compaction or a new session. Use proactively when context gets heavy or before a long/risky operation, and on request. Also the manual check of the context: show window fill and save when high. Triggers: checkpoint, save state, save point, compact, how many tokens, check the context, checkpoint and compact."
 ---
 
 Resume-handoff: tight, factual, skimmable.
@@ -21,6 +21,12 @@ One topic = ONE file, rewritten whole; no dated copies.
 - **Uncommitted work** — from `git status --short`.
 - **Key anchors** — `file:line`, IDs, commands, URLs.
 - **Open questions** — awaiting the user.
+
+## Context check (on "compact", "how many tokens", "check the context")
+
+1. Run `bash ~/.claude/hooks/context-fill.sh` (prints `<tokens> <pct> <k>`); tell the operator in one line: `Context: <k>k/<threshold>k · <pct>%` (threshold = `CLAUDE_CODE_AUTO_COMPACT_WINDOW` / 1000, unset → 1000k; pct is of it).
+2. `pct >= 75` or the operator asks to save → write the checkpoint as above. Otherwise none; say so.
+3. The session has no `/compact`: only the operator or auto-compact (a bit below that threshold) starts it; for an executor the observer may type it. After the checkpoint say in one line: "Checkpoint written, you can press `/compact`".
 
 ## After
 
