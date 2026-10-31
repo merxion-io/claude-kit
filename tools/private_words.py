@@ -4,7 +4,8 @@
 # --pre-push: what the push sends, messages and files of every new commit.
 # The denylist is .kit-private-words (untracked) in the main root of the kit: one word per line, blank lines and # ignored.
 # A linked worktree has no copy: the main root is found through git's common dir; outside a repo, the kit root.
-# A hit prints file:line and the word, exit 1. No list or no word in it: one line saying so, exit 0.
+# Cyrillic is a hit in every mode, list or no list. A hit prints file:line and the word, exit 1.
+# No list or no word in it: one line saying so, and only Cyrillic is looked for.
 import itertools, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -12,6 +13,7 @@ LISTNAME = '.kit-private-words'
 ZERO = '0' * 40
 GITLINK = '160000'
 SCISSORS = '# ------------------------ >8 ------------------------\n'
+CYRILLIC = r'[\u0400-\u04FF]+'
 
 
 def list_path():
@@ -28,10 +30,11 @@ def load_words(path):
         return [line.strip() for line in f if line.strip() and not line.lstrip().startswith('#')]
 
 
-def word_pattern(words):
-    """Case-insensitive, Unicode, whole word: not adjacent to a word character; an entry is matched literally."""
+def hit_pattern(words):
+    """Any Cyrillic run; a listed word case-insensitive, Unicode, whole word: not adjacent to a word character, matched literally."""
     parts = sorted((re.escape(w) for w in words), key = len, reverse = True)
-    return re.compile(r'(?<!\w)(?:' + '|'.join(parts) + r')(?!\w)', re.IGNORECASE)
+    listed = [r'(?<!\w)(?:' + '|'.join(parts) + r')(?!\w)'] if parts else []
+    return re.compile('|'.join(listed + [CYRILLIC]), re.IGNORECASE)
 
 
 def hits(pattern, text, where):
@@ -133,9 +136,8 @@ def main(argv):
     path = list_path()
     words = load_words(path) if os.path.exists(path) else []
     if not words:
-        print(f'private words: no words at {path}, nothing to check')
-        return 0
-    pattern = word_pattern(words)
+        print(f'private words: no words at {path}, only Cyrillic is checked')
+    pattern = hit_pattern(words)
     if argv[:1] == ['--message'] and len(argv) == 2:
         found = scan_index(pattern) + scan_message(pattern, argv[1])
     elif argv[:1] == ['--range'] and len(argv) == 2:

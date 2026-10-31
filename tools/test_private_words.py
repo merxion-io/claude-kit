@@ -5,6 +5,8 @@ import os, shutil, subprocess, sys, tempfile, unittest
 KIT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 GUARD = os.path.join(KIT, 'tools', 'private_words.py')
 WORDS = ['zorblax', 'quux.engine', 'Ünïcode']
+CYRILLIC = '\u043f\u0440\u0438\u0432\u0435\u0442'
+BOUNDS = ('\u0400', '\u04ff')  # the first and the last letter of the block
 
 
 class PrivateWords(unittest.TestCase):
@@ -278,6 +280,68 @@ class PrivateWords(unittest.TestCase):
             f.write('zorblax\n')
         done = subprocess.run([sys.executable, os.path.join(plain, 'tools', 'private_words.py')], capture_output = True, text = True)
         self.assertNotIn('no words at', done.stdout)  # the list was found; git itself then has no repo to scan
+
+    def test_cyrillic_is_a_hit_in_content_with_or_without_a_list(self):
+        for listed in (False, True):
+            with self.subTest(listed = listed):
+                if listed:
+                    self.list_words()
+                self.write('a.md', f'clean\nthe {CYRILLIC} is here\n')
+                done = self.guard()
+                self.assertEqual(done.returncode, 1, done.stdout)
+                self.assertIn(f'a.md:2: {CYRILLIC}', done.stdout)
+
+    def test_the_whole_block_is_a_hit_and_its_neighbours_are_not(self):
+        for letter in BOUNDS:
+            self.write('a.md', f'x{letter}x\n')
+            self.assertEqual(self.guard().returncode, 1, letter)
+        self.write('a.md', 'x\u03ffx\u0500x\n')
+        self.assertEqual(self.guard().returncode, 0)
+
+    def test_cyrillic_is_a_hit_in_a_file_name(self):
+        self.write(f'docs/{CYRILLIC}.md', 'clean\n')
+        done = self.guard()
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn(f'path docs/{CYRILLIC}.md', done.stdout)
+
+    def test_cyrillic_is_a_hit_in_the_not_staged_edit(self):
+        self.write('a.md', 'clean\n')
+        with open(os.path.join(self.repo, 'a.md'), 'w', encoding = 'utf-8') as f:
+            f.write(f'{CYRILLIC}\n')
+        self.assertIn('a.md (not staged):1:', self.guard().stdout)
+
+    def test_cyrillic_is_a_hit_in_a_message_not_in_its_comments(self):
+        msg = os.path.join(self.repo, 'msg')
+        with open(msg, 'w', encoding = 'utf-8') as f:
+            f.write(f'subject\n# {CYRILLIC}\n')
+        self.assertEqual(self.guard('--message', msg).returncode, 0)
+        with open(msg, 'w', encoding = 'utf-8') as f:
+            f.write(f'subject {CYRILLIC}\n')
+        self.assertEqual(self.guard('--message', msg).returncode, 1)
+
+    def test_cyrillic_is_a_hit_in_a_range(self):
+        self.write('a.md', 'x\n')
+        self.git('commit', '-qm', 'first')
+        self.write('b.md', 'x\n')
+        self.git('commit', '-qm', f'about {CYRILLIC}')
+        self.assertEqual(self.guard('--range', 'HEAD~1..HEAD').returncode, 1)
+        self.assertEqual(self.guard('--range', 'HEAD~1..HEAD~1').returncode, 0)
+
+    def test_cyrillic_is_a_hit_in_what_a_push_sends(self):
+        def push(sha):
+            return self.guard('--pre-push', 'origin', stdin = f'refs/heads/main {sha} refs/heads/main {"0" * 40}\n').returncode
+        self.write('a.md', 'x\n')
+        self.git('commit', '-qm', 'clean')
+        self.assertEqual(push(self.git('rev-parse', 'HEAD').stdout.strip()), 0)
+        for path, text, message in (('a.md', 'y\n', f'about {CYRILLIC}'), ('a.md', f'{CYRILLIC}\n', 'clean')):
+            self.write(path, text)
+            self.git('commit', '-qm', message)
+            self.assertEqual(push(self.git('rev-parse', 'HEAD').stdout.strip()), 1)
+
+    @unittest.skipUnless(os.path.exists(os.path.join(KIT, '.git')), 'the kit is not a repository here')
+    def test_the_kit_itself_holds_no_cyrillic_or_listed_word(self):
+        done = subprocess.run([sys.executable, GUARD], capture_output = True, text = True)
+        self.assertEqual(done.returncode, 0, done.stdout)
 
     def test_a_dangling_link_at_a_hook_is_foreign_too(self):
         target = os.path.join(tempfile.mkdtemp(), 'theirs')

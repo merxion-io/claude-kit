@@ -13,6 +13,7 @@ read -r cur _ _ < <(bash "$(dirname "$0")/context-fill.sh" "$tp" 2>/dev/null)
 case "${cur:-0}" in ''|*[!0-9]*) cur=0;; esac
 [ "$cur" -ge "${SESSIONEND_MIN:-200000}" ] || exit 0
 
-export PATH="$HOME/.nvm/versions/node/v22.23.1/bin:$PATH"
+# session_watch runs `claude -p`; a session started without nvm in its PATH has no claude here: take it from nvm's node
+command -v claude >/dev/null || for b in "$HOME"/.nvm/versions/node/*/bin; do [ -x "$b/claude" ] && { export PATH="$b:$PATH"; break; }; done
 python3 "$HOME/.claude/tools/session_watch.py" --detach --deadline 200 --session "$sess" --force --quiet >/dev/null 2>&1 &
 exit 0

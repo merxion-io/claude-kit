@@ -28,6 +28,7 @@
 import contextlib, glob, json, os, platform, re, shlex, shutil, signal, subprocess, sys, tempfile, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'tools'))
+import kit_check
 import roles
 import screen as screen_mod
 from roles import ROLE_NAMES, SILENCER, live, panes, processes
@@ -705,28 +706,28 @@ def doctor_checks():
           'own claude not checked: not run from claude - in a claude session type: ! claude-role doctor')
     pane = os.environ.get('TMUX_PANE')
     if pane and claude:
-        mine = roles.find_pane(pane)
+        try:
+            mine = roles.find_pane(pane)
+        except subprocess.CalledProcessError as e:
+            mine = None
+            check(False, f'pane {pane}: tmux does not answer: {e.stderr.strip()}', 'run from a shell where tmux works')
         role = mine and mine['@claude_role']
         if role:
             check(roles.live(mine, role, procs), f'pane {pane}: {role} "{mine["@claude_name"]}" '
                   f'seen alive', 'the @claude_pid label is not written yet - make any move in the session and repeat')
-    settings = os.path.join(roles.KIT, 'settings.json')
-    base = os.path.join(roles.KIT, 'settings.base.json')
-    try:
-        have = json.load(open(settings)).get('hooks', {})
-        need = json.load(open(base)).get('hooks', {})
-        commands = lambda groups: {h.get('command') for g in groups for h in g.get('hooks', [])}
-        missing = sorted(event for event, groups in need.items()
-                         if not commands(groups) <= commands(have.get(event, [])))
-        check(not missing, 'kit hooks in settings.json' + (f': missing in {", ".join(missing)}' if missing else ''),
-              f'move these events from {base} to {settings}')
-    except OSError as e:
-        check(False, f'settings.json is unreadable: {e}', 'run install.sh')
+    found = kit_check.findings(roles.KIT, os.getcwd())
+    for what, todo in found:
+        check(False, what, todo)
+    if not found:
+        check(True, 'the kit agrees with itself: skills, hook files, settings.json')
     check(True, 'executor push silencer: ' + ('present' if os.path.exists(SILENCER) else
                                                    'the first claude-role executor will create it'))
-    journal = roles.pult_journal() if shutil.which(roles.PULT) else None
-    check(True, f'pult: found, projects {len(journal[0])}' if journal else
-          'pult: not found - the kit works without it, sessions are not handed over to projects')
+    try:
+        journal = roles.pult_journal() if shutil.which(roles.PULT) else None
+        check(True, f'pult: found, projects {len(journal[0])}' if journal else
+              'pult: not found - the kit works without it, sessions are not handed over to projects')
+    except subprocess.CalledProcessError as e:
+        check(True, f'pult: does not answer ({e.stderr.strip()}) - the kit works without it, sessions are not handed over to projects')
     try:
         os.makedirs(roles.STATE_DIR, exist_ok = True)
         writable = os.access(roles.STATE_DIR, os.W_OK)
