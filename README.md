@@ -19,12 +19,13 @@ exception, but to take it to the end on one concrete case.
   burn tokens. Separately — when a task may be considered closed: only when all items are done.
 - `spec-first` — for projects where behaviour is written into a spec first: proposal → code → merge → archive,
   removing a mechanism with a check that it does not come back.
-- `roles` — the observer and executor roles (`claude-role`): how an executor asks, what the
-  observer decides alone and what it brings to the operator. For sessions with a role, the hook `hooks/role-intro.py`
-  at start, resume and compaction says who it is and asks to load the skill.
 - `checkpoint`, `compact-now` — save the session state before context compaction.
 - `artifact-location` — where to put HTML reports and pages.
 - `firecrawl` — fetch a page when an ordinary request gets 403 or an empty response.
+
+**Role texts** — `roles/`: the observer and executor rules (`claude-role`): how an executor asks, what the
+observer decides alone and what it brings to the operator. The hook `hooks/role-intro.py` puts the whole text into the
+context of a role session at every start, resume, /clear and compaction; nothing is left to load.
 
 **Subagents** — `agents/`: `builder` writes code from a brief, `code-reviewer` reviews and fixes only what is proven,
 `scout` finds the right places in code, `verifier` checks one finding. For projects with specs — `spec-reviewer`

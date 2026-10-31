@@ -418,25 +418,137 @@ class ScanDuringClose(unittest.TestCase):
         self.assertEqual(self.main([moment(DEAD, self.RUNNING, OPEN)] * 3), 2)
 
 
+def role_env(role, **extra):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('TMUX', 'CLAUDE_'))}
+    env.update(CLAUDE_ROLE = role, CLAUDE_ROLE_NAME = 'n', TMUX_PANE = '%1', **extra)
+    return env
+
+
 class RoleIntro(unittest.TestCase):
-    def line(self, role):
-        env = {k: v for k, v in os.environ.items() if not k.startswith(('TMUX', 'CLAUDE_'))}
-        env.update(CLAUDE_ROLE = role, CLAUDE_ROLE_NAME = 'n', TMUX_PANE = '%1')
-        out = subprocess.run([sys.executable, os.path.join(KIT, 'hooks/role-intro.py')], env = env, capture_output = True, text = True).stdout
+    def line(self, role, kit = KIT, source = 'startup'):
+        out = subprocess.run([sys.executable, os.path.join(kit, 'hooks/role-intro.py')], env = role_env(role),
+                             input = json.dumps({'source': source}), capture_output = True, text = True, check = True).stdout
         return json.loads(out)['hookSpecificOutput']['additionalContext'] if out else ''
 
-    def test_an_executor_gets_the_chat_rule(self):
-        self.assertIn('Chat and choice windows: English and terse', self.line('executor'))
+    def test_every_source_gets_who_and_the_whole_text_of_the_role(self):
+        for role in ('observer', 'executor'):
+            with open(os.path.join(KIT, 'roles', f'{role}.md'), encoding = 'utf-8') as f:
+                text = f.read()
+            for source in ('startup', 'resume', 'clear', 'compact'):
+                with self.subTest(role = role, source = source):
+                    line = self.line(role, source = source)
+                    self.assertIn(f'You are the {role} "n"', line)
+                    self.assertTrue(line.endswith(text.splitlines()[-1] + '\n'), line[-200:])
+                    self.assertIn(text, line)
+                    self.assertNotIn('Skill', line.split('\n')[0])
 
-    def test_an_observer_gets_none_of_it_and_no_role_is_silent(self):
-        self.assertNotIn('Chat:', self.line('observer'))
-        self.assertIn('ToolSearch', self.line('observer'))
+    def test_the_observer_gets_the_push_reminder_and_no_role_is_silent(self):
+        self.assertIn(' And load the push tool right away: ToolSearch("select:PushNotification").', self.line('observer'))
+        self.assertNotIn('ToolSearch("select', self.line('executor'))
         self.assertEqual(self.line('none'), '')
+
+    def test_a_missing_file_says_who_and_the_path(self):
+        kit = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, kit, True)
+        for rel in ('hooks/role-intro.py', 'tools/roles.py'):
+            os.makedirs(os.path.dirname(os.path.join(kit, rel)), exist_ok = True)
+            shutil.copy(os.path.join(KIT, rel), os.path.join(kit, rel))
+        line = self.line('executor', kit)
+        self.assertIn('You are the executor "n"', line)
+        self.assertIn(os.path.join(os.path.realpath(kit), 'roles', 'executor.md'), line)
+
+
+class ObserverSkills(unittest.TestCase):
+    """The real role-state hook; a tmux that answers nothing keeps the hook off every real server."""
+    DENY = 'this skill is not for the observer, give it to a subagent or an executor'
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        tmux = os.path.join(self.home, 'tmux')
+        with open(tmux, 'w') as f:
+            f.write('#!/bin/sh\nexit 0\n')
+        os.chmod(tmux, 0o755)
+
+    def run_hook(self, role, payload):
+        env = role_env(role, CLAUDE_ROLES_STATE_DIR = self.home)
+        env['PATH'] = f'{self.home}:{env["PATH"]}'
+        return subprocess.run([sys.executable, os.path.join(KIT, 'hooks/role-state.py')], input = payload, env = env,
+                              cwd = self.home, capture_output = True, text = True)
+
+    def decision(self, role, skill, **ev):
+        done = self.run_hook(role, json.dumps({'hook_event_name': 'PreToolUse', 'tool_name': 'Skill', 'session_id': 's', 'cwd': self.home,
+                                               'tool_input': {'skill': skill}, **ev}))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        said = [json.loads(line)['hookSpecificOutput'] for line in done.stdout.splitlines()]
+        return next((s for s in said if s.get('permissionDecision')), None)
+
+    def test_a_foreign_skill_is_denied(self):
+        for skill in ('engineering', '/engineering', 'plugin:orchestration'):
+            with self.subTest(skill = skill):
+                self.assertEqual(self.decision('observer', skill),
+                                 {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny', 'permissionDecisionReason': self.DENY})
+
+    def test_a_table_skill_is_allowed(self):
+        for skill in (*roles.OBSERVER_SKILLS, '/orchestration'):
+            with self.subTest(skill = skill):
+                self.assertIsNone(self.decision('observer', skill))
+
+    def test_a_subagent_of_the_observer_is_untouched(self):
+        self.assertIsNone(self.decision('observer', 'engineering', agent_id = 'a1'))
+
+    def test_an_executor_and_no_role_are_untouched(self):
+        for role in ('executor', 'none'):
+            with self.subTest(role = role):
+                self.assertIsNone(self.decision(role, 'engineering'))
+
+    def test_another_tool_of_the_observer_is_untouched(self):
+        done = self.run_hook('observer', json.dumps({'hook_event_name': 'PreToolUse', 'tool_name': 'Read', 'session_id': 's', 'cwd': self.home, 'tool_input': {}}))
+        self.assertNotIn('deny', done.stdout)
+
+    def test_a_malformed_payload_fails_open(self):
+        base = {'hook_event_name': 'PreToolUse', 'tool_name': 'Skill', 'session_id': 's', 'cwd': self.home}
+        for payload in ('{', '[]', json.dumps(base), json.dumps({**base, 'tool_input': 'x'}), json.dumps({**base, 'tool_input': {'skill': 1}})):
+            with self.subTest(payload = payload):
+                done = self.run_hook('observer', payload)
+                self.assertNotEqual(done.returncode, 2)  # exit 2 is the one failing exit that blocks
+                self.assertNotIn('deny', done.stdout)
+
+
+class CompactResume(unittest.TestCase):
+    def setUp(self):
+        self.home = os.path.realpath(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.cwd = os.path.join(self.home, 'project')
+        self.file = os.path.join(self.cwd, '.claude', 'checkpoints', 'abcdefgh-session.md')
+        os.makedirs(os.path.dirname(self.file))
+
+    def output(self, text):
+        with open(self.file, 'w', encoding = 'utf-8') as f:
+            f.write(text)
+        return subprocess.run(['bash', os.path.join(KIT, 'hooks/compact-resume.sh')], input = json.dumps({'session_id': 'abcdefgh-1', 'cwd': self.cwd}),
+                              env = {**os.environ, 'HOME': self.home}, capture_output = True, text = True, check = True).stdout
+
+    def context(self, out):
+        return json.loads(out)['hookSpecificOutput']['additionalContext']
+
+    def test_a_long_checkpoint_is_cut_under_the_limit_and_names_its_file(self):
+        for filler in ('x' * 20000, 'a "quoted" line\n' * 1250, chr(0x436) * 20000):  # escapes count in the output; a character is one
+            with self.subTest(filler = filler[:16]):
+                out = self.output(filler)
+                self.assertLess(len(out), roles.CONTEXT_LIMIT)
+                self.assertGreater(len(out), roles.CONTEXT_LIMIT - 100)
+                self.assertEqual(self.context(out).splitlines()[-1], f'--- checkpoint cut here, the rest is in {self.file} ---')
+
+    def test_a_short_checkpoint_arrives_whole(self):
+        context = self.context(self.output('line one\nline two'))
+        self.assertIn('line one\nline two\n--- end of checkpoint ---', context)
+        self.assertNotIn('cut here', context)
 
 
 class ObserverTable(unittest.TestCase):
-    def test_every_command_of_the_usage_is_in_the_skill_table(self):
-        with open(os.path.join(KIT, 'skills/roles/SKILL.md'), encoding = 'utf-8') as f:
+    def test_every_command_of_the_usage_is_in_the_observer_table(self):
+        with open(os.path.join(KIT, 'roles/observer.md'), encoding = 'utf-8') as f:
             table = ' '.join(line for line in f if line.startswith('|'))
         commands = set(re.findall(r'claude-role (\w+)', launcher.USAGE))
         self.assertIn('close', commands)

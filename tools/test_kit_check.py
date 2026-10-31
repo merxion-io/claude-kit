@@ -5,6 +5,7 @@ import json, os, shutil, subprocess, sys, tempfile, time, unittest
 KIT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(KIT, 'tools'))
 import kit_check
+import roles
 
 # Dead hooks a later change deletes; that change empties this and then removes it.
 EXPECTED_DEAD = ['hooks/watch-ensure.sh', 'hooks/context-guard.sh']
@@ -30,6 +31,10 @@ class Fixture(unittest.TestCase):
         os.makedirs(self.cwd)
         self.write('agents/a.md', '---\nname: a\nskills:\n  - known\nmodel: opus\n---\nbody\n')
         self.write('skills/known/SKILL.md', 'x\n')
+        for name in roles.OBSERVER_SKILLS:
+            self.write(f'skills/{name}/SKILL.md', 'x\n')
+        for role in roles.ROLE_NAMES:
+            self.write(f'roles/{role}.md', 'x\n')
         self.write('hooks/live.sh', 'bash "$(dirname "$0")/helper.sh"\n')
         self.write('hooks/helper.sh', 'true\n')
         self.settings('settings.base.json', hooks = hooks_of(LIVE))
@@ -86,6 +91,18 @@ class Fixture(unittest.TestCase):
             with self.subTest(text = text):
                 self.gates(text)
                 self.assertIn('is unreadable', self.found()[0])
+
+    def test_a_role_file_is_gone(self):
+        os.remove(os.path.join(self.root, 'roles/executor.md'))
+        self.assertEqual(self.found(), ['roles/executor.md: no such file'])
+
+    def test_a_role_text_over_the_limit_of_a_hook(self):
+        self.write('roles/observer.md', 'x' * roles.CONTEXT_LIMIT)
+        self.assertEqual(self.found(), [f'roles/observer.md: its intro is over {roles.CONTEXT_LIMIT} chars, the end would be lost'])
+
+    def test_an_observer_skill_is_gone(self):
+        shutil.rmtree(os.path.join(self.root, 'skills/checkpoint'))
+        self.assertEqual(self.found(), ['tools/roles.py OBSERVER_SKILLS names skill checkpoint: not under skills/'])
 
     def test_a_hook_file_without_registration_or_caller(self):
         self.write('hooks/dead.sh', 'true\n')
@@ -150,6 +167,10 @@ class Doctor(unittest.TestCase):
         shutil.copytree(os.path.join(KIT, 'tools'), os.path.join(self.kit, 'tools'), ignore = shutil.ignore_patterns('quality', '__pycache__'))
         os.makedirs(os.path.join(self.kit, 'hooks'))
         os.makedirs(os.path.join(self.kit, 'agents'))
+        shutil.copytree(os.path.join(KIT, 'roles'), os.path.join(self.kit, 'roles'))
+        for name in roles.OBSERVER_SKILLS:
+            os.makedirs(os.path.join(self.kit, 'skills', name))
+            open(kit_check.skill_file(self.kit, name), 'w').close()
         with open(os.path.join(self.kit, 'hooks', 'live.sh'), 'w') as f:
             f.write('true\n')
         for name in ('settings.base.json', 'settings.json'):

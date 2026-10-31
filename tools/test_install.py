@@ -34,6 +34,8 @@ class Install(unittest.TestCase):
         self.install()
         self.assertTrue(os.path.exists(os.path.join(self.target, 'tools', 'write_guard.py')))
         self.assertTrue(os.path.exists(os.path.join(self.target, 'tools', 'skill_gates.py')))
+        self.assertTrue(os.path.exists(os.path.join(self.target, 'roles', 'observer.md')))
+        self.assertTrue(os.path.exists(os.path.join(self.target, 'roles', 'executor.md')))
         self.assertFalse(os.path.exists(os.path.join(self.target, 'gates')))
         self.assertEqual(self.commands('SubagentStop'), [ROLE_STATE])
 

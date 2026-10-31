@@ -8,7 +8,7 @@
 # For both roles on SessionStart — pane labels (role, name, observer, flags — passed by the launcher in the environment),
 # the revive list (state/roles.json: conversation id, folder, flags, project) and the session into the pult project, if it is not there yet;
 # on the normal SessionEnd — "closed"; remote control turned on mid-run goes into the flags. An executor that needs an observer (a state that wakes) while there is none
-# brings it up. An executor keeps to its rules by tools/write_guard.py (its main session changes no files inside a git repository) and tools/skill_gates.py (gates of the project table). Without a role and in nested claudes the hook is silent (roles.role_session).
+# brings it up. The observer's main session loads only the skills of roles.OBSERVER_SKILLS. An executor keeps to its rules by tools/write_guard.py (its main session changes no files inside a git repository) and tools/skill_gates.py (gates of the project table). Without a role and in nested claudes the hook is silent (roles.role_session).
 import contextlib, json, os, re, shlex, sys, time, traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'tools'))
@@ -85,10 +85,20 @@ def state_for(ev, current, running = frozenset()):
     return None
 
 
-def guarded(guard, ev, keeper, name):
+def observer_skill(ev):
+    """PreToolUse of the observer's main session → a deny for a skill outside the table; a plugin prefix is part of the name."""
+    if ev['hook_event_name'] != 'PreToolUse' or ev.get('tool_name') != 'Skill' or ev.get('agent_id'):
+        return None
+    if ev['tool_input']['skill'].removeprefix('/') in roles.OBSERVER_SKILLS:
+        return None
+    return {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+            'permissionDecisionReason': 'this skill is not for the observer, give it to a subagent or an executor'}
+
+
+def guarded(hold, ev, *args):
     """A guard that fails is open: the labels and the other guard still run; the trace goes to the debug log (stderr, exit 0)."""
     try:
-        return guard.hold(ev, keeper, name)
+        return hold(ev, *args)
     except Exception:
         traceback.print_exc()
         return None
@@ -104,11 +114,13 @@ def main():
         return  # died, not closed: the label and the list stay as they were — the pane may be gone
     if role == 'executor':
         keeper = os.environ.get(roles.ROLE_OBSERVER) or roles.pane_option(pane, '@claude_observer')
-        said = guarded(skill_gates, ev, keeper, name) or guarded(write_guard, ev, keeper, name)  # gates first: a denied call takes no snapshot
-        if said:
-            print(json.dumps({'hookSpecificOutput': said}))  # ASCII: a file name not in UTF-8 cannot break the output
-            if said.get('permissionDecision') == 'deny':
-                return  # the call does not run: the label stays as it was
+        said = guarded(skill_gates.hold, ev, keeper, name) or guarded(write_guard.hold, ev, keeper, name)  # gates first: a denied call takes no snapshot
+    else:
+        said = guarded(observer_skill, ev)
+    if said:
+        print(json.dumps({'hookSpecificOutput': said}))  # ASCII: a file name not in UTF-8 cannot break the output
+        if said.get('permissionDecision') == 'deny':
+            return  # the call does not run: the label stays as it was
     pid = roles.role_pid()
     if roles.pane_option(pane, roles.PID_LABEL) != pid:
         roles.set_pane_option(pane, roles.PID_LABEL, pid)  # it shows liveness without the environment of a foreign process

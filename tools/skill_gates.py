@@ -1,7 +1,8 @@
 # An executor keeps to its project's gates: an action of the project's table (commit, spec write, build, full test run,
 # Agent…) is denied while one of its skills was never loaded. The table is <project>/.claude/kit-gates.json up from cwd,
 # for a Bash command up from the directory it acts in; none → no gates. Kept per executor (observer and name): the skills its main session has loaded — at any time in this
-# conversation; compaction and resume keep them (re-injected), startup and /clear start empty.
+# conversation; compaction keeps them (re-injected), a resume keeps the mark, but a skill loaded before a process restart
+# without a compaction is not re-injected; startup and /clear start empty. The role text does not depend on this.
 # Subagents (payload agent_id) are never touched; the observer is not either (the caller passes executors only).
 import json, os, re
 

@@ -43,6 +43,8 @@ SEEN = '@claude_seen'  # on the executor pane: the state label the waiter alread
 STATE = '@claude_state'
 KILLED = 'other'  # reason in SessionEnd when claude is killed (kill-session, signal); /exit, Ctrl+C — prompt_input_exit
 ROLE_NAMES = {'observer': 'observer', 'executor': 'executor'}
+OBSERVER_SKILLS = ('orchestration', 'checkpoint', 'compact-now')  # what the observer's main session may load; hooks/role-state.py denies the rest
+CONTEXT_LIMIT = 10000  # chars of one hook's additionalContext (claude 2.1.316): over it arrive a 2KB preview and a file path
 ROLE_PID = 'CLAUDE_ROLE_PID'  # PID of the claude started by claude-role: the launcher does exec, the PID is the same
 ROLE_OBSERVER = 'CLAUDE_ROLE_OBSERVER'  # next — what the launcher passes to SessionStart: the executor's observer,
 ROLE_FLAGS = 'CLAUDE_ROLE_FLAGS'  # launch flags (shlex) and the pult project
@@ -237,6 +239,23 @@ def role_session():
     if mark is None:
         return role  # started before the PID label — the old behaviour until restart via claude-role
     return role if str(own_claude()) == mark else None
+
+
+def role_file(root, role):
+    return os.path.join(root, 'roles', f'{role}.md')
+
+
+def role_intro(role, name, root = KIT):
+    """The SessionStart output of a role session: who it is and the whole text of its role. No readable file: says so."""
+    path, who = role_file(root, role), f'You are the {role} "{name}".'
+    if role == 'observer':  # after compaction deferred tool schemas are gone: the first push would fail
+        who += ' And load the push tool right away: ToolSearch("select:PushNotification").'
+    try:
+        with open(path, encoding = 'utf-8') as f:
+            context = f'{who}\n\n{f.read()}'
+    except (OSError, ValueError):
+        context = f'{who} Your role file is missing or unreadable: {path}'
+    return json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}, ensure_ascii = False)
 
 
 def role_pid():
@@ -522,5 +541,5 @@ def revive_observer(observer, caller):
         if p:
             entry = {**entry, 'flags': shlex.split(p['@claude_flags'])}
         where = relaunch('observer', observer, None, entry, pane = p['pane_id'] if p else None,
-                         prompt = f'You were brought back up after a crash (by executor "{caller}"): act by skill roles.')
+                         prompt = f'You were brought back up after a crash (by executor "{caller}"): act by your role text.')
         return 'revived' if wait_live(where, 'observer') else f'did not start in {STARTUP_LIMIT} s'

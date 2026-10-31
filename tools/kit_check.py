@@ -5,6 +5,7 @@
 # (a kit copied by install.sh) that rule says nothing.
 import glob, json, os, re, shlex, subprocess
 
+import roles
 from write_guard import PROJECT_GATES
 
 KIT_PREFIX = re.compile(r'^(?:\$HOME|\$\{HOME\}|~)/\.claude(?=/)')
@@ -47,6 +48,22 @@ def gate_skills(root, cwd):
         return [(f'{path} is unreadable: {e}', 'fix the table: {"gates": [{"skills": [...]}]}')]
     return [(f'{path} names skill {name}: not in the kit or the project', f'add skill {name} or fix the table')
             for name in names if not any(os.path.isfile(skill_file(home, name)) for home in (root, os.path.join(cwd, '.claude')))]
+
+
+def role_texts(root, cwd):
+    """A role's file exists and its SessionStart output stays whole."""
+    found = []
+    for role in roles.ROLE_NAMES:
+        if not os.path.isfile(roles.role_file(root, role)):
+            found.append((f'roles/{role}.md: no such file', 'restore it from git'))
+        elif len(roles.role_intro(role, 'name', root)) >= roles.CONTEXT_LIMIT:
+            found.append((f'roles/{role}.md: its intro is over {roles.CONTEXT_LIMIT} chars, the end would be lost', 'shorten the role text'))
+    return found
+
+
+def observer_skills(root, cwd):
+    return [(f'tools/roles.py OBSERVER_SKILLS names skill {name}: not under skills/', f'add skills/{name}/SKILL.md or drop the name')
+            for name in roles.OBSERVER_SKILLS if not os.path.isfile(skill_file(root, name))]
 
 
 def read_settings(path):
@@ -156,7 +173,7 @@ def settings_hooks(root):
            [(f'settings.json runs a kit hook settings.base.json does not hold there: {c}', f'remove it from {path}') for c in stale]
 
 
-TREE_CHECKS = (agent_skills, gate_skills, hook_commands, hook_files)  # a new rule over the tree is one more function here
+TREE_CHECKS = (agent_skills, gate_skills, role_texts, observer_skills, hook_commands, hook_files)  # a new rule over the tree is one more function here
 
 
 def tree_findings(root, cwd):

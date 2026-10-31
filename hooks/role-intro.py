@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
-# SessionStart (start, resume, /clear, compaction): for sessions with a role — one line into the context: who it is and where
-# its rules are. Without a role and in nested claudes — silent.
-import json, os, sys
+# SessionStart (start, resume, /clear, compaction): for sessions with a role, who it is and the whole text of its role go into
+# the context (roles.role_intro), so nothing is left for the model to load. Without a role and in nested claudes: silent.
+import os, sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'tools'))
-from roles import ROLE_NAMES, role_session
+from roles import ROLE_NAMES, role_intro, role_session
 
-session = role_session()
-role = ROLE_NAMES.get(session)
+role = ROLE_NAMES.get(role_session())
 if role:
-    line = (f'You are the {role} "{os.environ.get("CLAUDE_ROLE_NAME", "")}", your rules are in skill `roles`. '
-            f'Load it now (Skill roles), before any work.')
-    if session == 'observer':  # after compaction deferred tool schemas are gone: the first push would fail
-        line += ' And load the push tool right away: ToolSearch("select:PushNotification").'
-    if session == 'executor':
-        line += (" Chat and choice windows: English and terse; a message with no relay label is the"
-                 " operator: answer them by CLAUDE.md. Commits and project documents keep the project's language.")
-    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': line}},
-                     ensure_ascii = False))
+    print(role_intro(role, os.environ.get('CLAUDE_ROLE_NAME', '')))

@@ -11,6 +11,12 @@ claude-role brief "<executor>"                                     # observer: t
 claude-role doctor                                                # self-check of the machine
 ```
 
+## Role text
+
+The rules of a role are `roles/observer.md` and `roles/executor.md`. `hooks/role-intro.py` puts who the session is and the
+whole text into its context on every SessionStart (start, resume, /clear, compaction): a request to load a skill was not
+reliable. A hook's context is limited to 10000 chars, so `claude-role doctor` reports a text that grows over it.
+
 ## Launch
 
 Any `claude` flags (`-r`, `--model`, `--remote-control "<name>"`) pass straight through. An observer starts with remote
@@ -135,6 +141,9 @@ The observer may press in an executor's window only with `claude-role press "<ex
 executor. The same hook guards the orchestration rules for role sessions (table of kinds of work in
 `skills/orchestration/references/routing.md`) and reminds an executor about an operation that runs longer than its series.
 
+`hooks/role-state.py` denies the observer's main session any skill outside `OBSERVER_SKILLS` (`tools/roles.py`), without
+asking the operator; subagents, executors and sessions with no role are untouched. A failing check is open.
+
 Screen reading is `tools/screen.py`, pinned to the UI strings of Claude Code 2.1.312.
 
 ## Write guard
@@ -153,8 +162,8 @@ the session's folder.
 ## Skill gates
 
 Project gates (`tools/skill_gates.py`): an action (commit, spec write, build, full test run, Agent) is denied while
-one of its skills was never loaded in the session. Compaction and resume keep the loaded skills (Claude Code re-injects
-them); startup and /clear start empty.
+one of its skills was never loaded in the session. Compaction keeps the loaded skills (Claude Code re-injects them); a resume keeps
+the mark, but a skill loaded before a process restart without a compaction is not re-injected; startup and /clear start empty.
 
 The table is the project's: `<project>/.claude/kit-gates.json`; no table, no gates. Its key "open" (a list of paths, a trailing `/` = a folder at any depth) adds to the write guard's open list.
 

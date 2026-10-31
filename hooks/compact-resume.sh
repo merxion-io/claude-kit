@@ -2,7 +2,8 @@
 # SessionStart(compact): after the window is compacted, puts the checkpoint of EXACTLY THIS
 # session into the context — whole, as text. Before, the hook only asked to "read the freshest file in
 # .claude/checkpoints/", and the freshest there could belong to a completely different task from a week
-# ago — and the session came back to not its own work.
+# ago — and the session came back to not its own work. A hook's output over 10000 chars (roles.CONTEXT_LIMIT) arrives as a 2KB
+# preview, so a longer checkpoint is cut to fit, with a last line naming the file.
 input="$(cat)"
 q() { printf '%s' "$input" | jq -r "$1 // empty" 2>/dev/null; }
 tp="$(q .transcript_path)"; cwd="$(q .cwd)"; sid="$(q .session_id)"
@@ -23,12 +24,16 @@ manual="$(ls -t "$dir/$sess"-*.md 2>/dev/null | grep -v -- '-session\.md$' | hea
 base='The context was just compacted. Treat the summary as incomplete: restore the working state from durable sources and continue the interrupted task (git status --short: uncommitted; the spec of the project (its CLAUDE.md names where): the truth about behaviour). The checkpoint is written by another model from a digest: check each "done" in it against the files and git before relying on it.'
 [ -n "$sess" ] && [ -n "$manual" ] && base="$base Manual notes of this session, read them: $manual"
 if [ -n "$cp_file" ] && [ -s "$cp_file" ]; then
-  ctx="$base
-
---- CHECKPOINT OF THIS SESSION ($cp_file) ---
-$(head -c 24000 "$cp_file")
---- end of checkpoint ---"
+  jq -rn --arg base "$base" --arg file "$cp_file" --rawfile body "$cp_file" '
+    def output($c): {hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}} | tojson;
+    ($base + "\n\n--- CHECKPOINT OF THIS SESSION (" + $file + ") ---\n") as $head
+    | ("\n--- checkpoint cut here, the rest is in " + $file + " ---") as $cut
+    | def cut_at($n): output($head + $body[:$n] + $cut);
+      def fits: length < 9999;  # jq -r adds a newline
+      def fit($low; $high): if $high - $low <= 1 then cut_at($low)
+        else ((($low + $high) / 2) | floor) as $mid | if (cut_at($mid) | fits) then fit($mid; $high) else fit($low; $mid) end end;
+    output($head + $body + "\n--- end of checkpoint ---") as $whole
+    | if ($whole | fits) then $whole else fit(0; $body | length) end'
 else
-  ctx="$base This session has no checkpoint. Do NOT take other files from .claude/checkpoints/: they belong to other tasks."
+  jq -cn --arg c "$base This session has no checkpoint. Do NOT take other files from .claude/checkpoints/: they belong to other tasks." '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
 fi
-jq -cn --arg c "$ctx" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
