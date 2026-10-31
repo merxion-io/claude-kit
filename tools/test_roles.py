@@ -425,8 +425,8 @@ def role_env(role, **extra):
 
 
 class RoleIntro(unittest.TestCase):
-    def line(self, role, kit = KIT, source = 'startup'):
-        out = subprocess.run([sys.executable, os.path.join(kit, 'hooks/role-intro.py')], env = role_env(role),
+    def line(self, role, kit = KIT, source = 'startup', **env):
+        out = subprocess.run([sys.executable, os.path.join(kit, 'hooks/role-intro.py')], env = {**role_env(role), **env},
                              input = json.dumps({'source': source}), capture_output = True, text = True, check = True).stdout
         return json.loads(out)['hookSpecificOutput']['additionalContext'] if out else ''
 
@@ -446,6 +446,13 @@ class RoleIntro(unittest.TestCase):
         self.assertIn(' And load the push tool right away: ToolSearch("select:PushNotification").', self.line('observer'))
         self.assertNotIn('ToolSearch("select', self.line('executor'))
         self.assertEqual(self.line('none'), '')
+
+    def test_a_stdout_not_in_utf8_still_gets_the_whole_text(self):
+        with open(os.path.join(KIT, 'roles', 'observer.md'), encoding = 'utf-8') as f:
+            self.assertIn(f.read(), self.line('observer', PYTHONIOENCODING = 'ascii'))
+
+    def test_a_name_not_in_utf8_still_gets_the_text(self):
+        self.assertIn('# Executor', self.line('executor', CLAUDE_ROLE_NAME = 'a\udcff'))
 
     def test_a_missing_file_says_who_and_the_path(self):
         kit = tempfile.mkdtemp()

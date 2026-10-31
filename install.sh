@@ -8,7 +8,7 @@ mkdir -p "$TARGET"
 
 # The kit is cloned right into ~/.claude — the files are already in place
 if [ "$KIT" != "$(cd "$TARGET" && pwd)" ]; then
-  for item in CLAUDE.md agents bin hooks tools skills roles; do
+  for item in CLAUDE.md settings.base.json agents bin hooks tools skills roles; do
     [ -e "$KIT/$item" ] || continue
     if [ -d "$KIT/$item" ]; then mkdir -p "$TARGET/$item"; cp -R "$KIT/$item/." "$TARGET/$item/"; else cp "$KIT/$item" "$TARGET/$item"; fi
   done

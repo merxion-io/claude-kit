@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # The kit checks itself: the one home of the rules, called by `claude-role doctor` and tools/test_kit_check.py. Read-only.
 # Everything is read from the kit root and the cwd handed in, never from HOME: "$HOME/.claude" in a hook command means the root.
-# A finding is (what is wrong, what to do). Which hook files have a caller is known only in a git repository: elsewhere
-# (a kit copied by install.sh) that rule says nothing.
+# A finding is (what is wrong, what to do). Which hook files have a caller is known only when the root is the top of a git
+# repository: elsewhere (a kit copied by install.sh, even under a home in git) that rule says nothing.
 import glob, json, os, re, shlex, subprocess
 
 import roles
@@ -56,6 +56,8 @@ def role_texts(root, cwd):
     for role in roles.ROLE_NAMES:
         if not os.path.isfile(roles.role_file(root, role)):
             found.append((f'roles/{role}.md: no such file', 'restore it from git'))
+        elif roles.role_text(root, role) is None:
+            found.append((f'roles/{role}.md: unreadable, the session would get no rules', 'restore it from git'))
         elif len(roles.role_intro(role, 'name', root)) >= roles.CONTEXT_LIMIT:
             found.append((f'roles/{role}.md: its intro is over {roles.CONTEXT_LIMIT} chars, the end would be lost', 'shorten the role text'))
     return found
@@ -86,7 +88,7 @@ def event_commands(settings):
     """event -> the commands of its hooks; a malformed part holds none (install.sh leaves it as it is)."""
     events = settings.get('hooks')
     return {event: {h['command'] for g in groups if isinstance(g, dict) and isinstance(g.get('hooks'), list)
-                    for h in g['hooks'] if isinstance(h, dict) and h.get('command')}
+                    for h in g['hooks'] if isinstance(h, dict) and isinstance(h.get('command'), str)}
             for event, groups in (events.items() if isinstance(events, dict) else ()) if isinstance(groups, list)}
 
 
@@ -98,6 +100,14 @@ def base_commands(settings):
 def command_files(root, command):
     """The paths a hook command names, the kit's own under the root."""
     return [os.path.normpath(KIT_PREFIX.sub(lambda _: root, word)) for word in shlex.split(command) if '/' in word]
+
+
+def parsable_files(root, command):
+    """command_files; a command shlex cannot split names none (hook_commands says so)."""
+    try:
+        return command_files(root, command)
+    except ValueError:
+        return []
 
 
 def hook_commands(root, cwd):
@@ -119,9 +129,14 @@ def hook_commands(root, cwd):
 
 
 def git_files(root, *args):
-    """Paths from git ls-files, or None outside a repository."""
-    done = subprocess.run(['git', '-C', root, 'ls-files', '-z', *args], capture_output = True)
-    return None if done.returncode else os.fsdecode(done.stdout).split('\0')[:-1]
+    """Paths from git ls-files, or None when the root is not the top of a repository or there is no git."""
+    try:
+        top = subprocess.run(['git', '-C', root, 'rev-parse', '--show-cdup'], capture_output = True)
+        if top.returncode or top.stdout.strip():
+            return None
+        return os.fsdecode(subprocess.run(['git', '-C', root, 'ls-files', '-z', *args], capture_output = True, check = True).stdout).split('\0')[:-1]
+    except (OSError, subprocess.CalledProcessError):
+        return None
 
 
 def is_test(path):
@@ -144,7 +159,7 @@ def hook_files(root, cwd):
     tracked = git_files(root)
     if tracked is None:
         return []
-    registered = {f for c in base_commands(base_settings(root)) for f in command_files(root, c)}
+    registered = {f for c in base_commands(base_settings(root)) for f in parsable_files(root, c)}
     return [(f'{hook}: not in settings.base.json, no tracked file calls it', 'register it or delete it')
             for hook in git_files(root, '-c', '-o', '--exclude-standard', 'hooks/')
             if os.path.join(root, hook) not in registered and not has_caller(root, hook, tracked)]
@@ -152,10 +167,7 @@ def hook_files(root, cwd):
 
 def is_kit_hook(root, command):
     hooks = os.path.join(root, 'hooks') + os.sep
-    try:
-        return any(f.startswith(hooks) for f in command_files(root, command))
-    except ValueError:
-        return False
+    return any(f.startswith(hooks) for f in parsable_files(root, command))
 
 
 def settings_hooks(root):

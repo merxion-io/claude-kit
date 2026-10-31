@@ -245,17 +245,23 @@ def role_file(root, role):
     return os.path.join(root, 'roles', f'{role}.md')
 
 
+def role_text(root, role):
+    """The text of a role; None when its file is missing or unreadable."""
+    try:
+        with open(role_file(root, role), encoding = 'utf-8') as f:
+            return f.read()
+    except (OSError, ValueError):
+        return None
+
+
 def role_intro(role, name, root = KIT):
-    """The SessionStart output of a role session: who it is and the whole text of its role. No readable file: says so."""
-    path, who = role_file(root, role), f'You are the {role} "{name}".'
+    """The SessionStart output of a role session: who it is and the whole text of its role. No readable file: says so.
+    ASCII: neither the stdout's encoding nor a name not in UTF-8 can break the output."""
+    who, text = f'You are the {role} "{name}".', role_text(root, role)
     if role == 'observer':  # after compaction deferred tool schemas are gone: the first push would fail
         who += ' And load the push tool right away: ToolSearch("select:PushNotification").'
-    try:
-        with open(path, encoding = 'utf-8') as f:
-            context = f'{who}\n\n{f.read()}'
-    except (OSError, ValueError):
-        context = f'{who} Your role file is missing or unreadable: {path}'
-    return json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}, ensure_ascii = False)
+    context = f'{who} Your role file is missing or unreadable: {role_file(root, role)}' if text is None else f'{who}\n\n{text}'
+    return json.dumps({'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}})
 
 
 def role_pid():

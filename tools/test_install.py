@@ -39,6 +39,13 @@ class Install(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.target, 'gates')))
         self.assertEqual(self.commands('SubagentStop'), [ROLE_STATE])
 
+    def test_a_fresh_install_passes_its_own_self_check(self):
+        self.install()
+        check = 'import kit_check, sys; print(kit_check.findings(sys.argv[1], sys.argv[1]))'
+        done = subprocess.run([sys.executable, '-c', check, self.target], cwd = os.path.join(self.target, 'tools'),
+                              capture_output = True, text = True, check = True)
+        self.assertEqual(done.stdout.strip(), '[]')
+
     def test_missing_hooks_added_foreign_hook_kept(self):
         self.write_settings({'hooks': {'PreToolUse': [{'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': FOREIGN}]}]}})
         out = self.install()

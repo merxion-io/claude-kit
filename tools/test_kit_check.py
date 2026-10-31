@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # The kit's self-check over the real tree and over a small invented kit: python3 tools/test_kit_check.py
 import json, os, shutil, subprocess, sys, tempfile, time, unittest
+from unittest import mock
 
 KIT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 sys.path.insert(0, os.path.join(KIT, 'tools'))
@@ -96,6 +97,11 @@ class Fixture(unittest.TestCase):
         os.remove(os.path.join(self.root, 'roles/executor.md'))
         self.assertEqual(self.found(), ['roles/executor.md: no such file'])
 
+    def test_a_role_file_not_in_utf8_is_a_finding(self):
+        with open(os.path.join(self.root, 'roles/executor.md'), 'wb') as f:
+            f.write(b'\xff\xfe')
+        self.assertEqual(self.found(), ['roles/executor.md: unreadable, the session would get no rules'])
+
     def test_a_role_text_over_the_limit_of_a_hook(self):
         self.write('roles/observer.md', 'x' * roles.CONTEXT_LIMIT)
         self.assertEqual(self.found(), [f'roles/observer.md: its intro is over {roles.CONTEXT_LIMIT} chars, the end would be lost'])
@@ -123,6 +129,31 @@ class Fixture(unittest.TestCase):
         shutil.rmtree(os.path.join(self.root, '.git'))
         self.write('hooks/dead.sh', 'true\n')
         self.assertEqual(self.found(), [])
+
+    def test_a_kit_copied_into_a_foreign_repository_has_no_caller_rule(self):
+        shutil.rmtree(os.path.join(self.root, '.git'))
+        outer = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, outer, True)
+        subprocess.run(['git', '-C', outer, 'init', '-q'], check = True)
+        self.root = os.path.join(outer, '.claude')
+        shutil.copytree(os.path.dirname(self.cwd), self.root)
+        self.cwd = os.path.join(self.root, 'project')
+        self.assertEqual(self.found(), [])
+
+    def test_no_git_on_the_machine_the_caller_rule_is_silent(self):
+        self.write('hooks/dead.sh', 'true\n')
+        with mock.patch.dict(os.environ, {'PATH': self.cwd}):
+            self.assertEqual(self.found(), [])
+
+    def test_an_unbalanced_quote_in_a_base_command_is_a_finding(self):
+        broken = 'bash "$HOME/.claude/hooks/live.sh'
+        self.settings('settings.base.json', hooks = hooks_of(LIVE, broken))
+        self.settings('settings.json', hooks = hooks_of(LIVE, broken))
+        self.assertEqual(self.found(), [f'settings.base.json hook {broken}: No closing quotation'])
+
+    def test_a_command_that_is_no_string_holds_nothing(self):
+        self.settings('settings.json', hooks = {'Stop': [{'hooks': [{'command': ['x']}]}]})
+        self.assertEqual(self.found(), ['kit hooks in settings.json: missing in Stop'])
 
     def test_a_base_hook_command_without_its_file(self):
         gone = 'bash "$HOME/.claude/hooks/gone.sh"'
