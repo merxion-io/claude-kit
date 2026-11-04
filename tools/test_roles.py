@@ -202,7 +202,8 @@ class CloseLive(unittest.TestCase):
                 f.write(body)
             os.chmod(f'{bin_dir}/{name}', 0o755)
         env = {k: v for k, v in os.environ.items() if not k.startswith(('TMUX', 'CLAUDE_'))}
-        self.env = {**env, 'PATH': f'{bin_dir}:/usr/bin:/bin', 'SHELL': '/bin/bash', 'CLAUDE_ROLES_STATE_DIR': self.state,
+        # The python running the tests goes first: /usr/bin/python3 on macOS is 3.9, below the kit's 3.11
+        self.env = {**env, 'PATH': f'{bin_dir}:{os.path.dirname(sys.executable)}:/usr/bin:/bin','SHELL': '/bin/bash', 'CLAUDE_ROLES_STATE_DIR': self.state,
                     'XDG_STATE_HOME': f'{root}/xdg', 'CLAUDE_CONFIG_DIR': f'{root}/cfg',
                     'LAB_HOOK': os.path.join(KIT, 'hooks/role-state.py')}
         self.observer = {**self.env, 'CLAUDE_ROLE': 'observer', 'CLAUDE_ROLE_NAME': 'obs', 'TMUX': f'{root}/s,0,0'}

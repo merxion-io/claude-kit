@@ -175,7 +175,7 @@ class PrivateWords(unittest.TestCase):
         with open(os.path.join(self.repo, 'c.md'), 'w') as f:
             f.write('clean\n')
         verbose = subprocess.run(['git', '-C', self.repo, 'commit', '-a', '-v'], capture_output = True, text = True,
-                                 env = {**os.environ, 'GIT_EDITOR': 'sed -i 1iremoved'})
+                                 env = {**os.environ, 'GIT_EDITOR': 'perl -i -pe \'print "removed\\n" if $. == 1\''})
         self.assertEqual(verbose.returncode, 0, verbose.stdout)
 
     def test_push_refuses_a_word_only_in_the_pushed_history(self):
