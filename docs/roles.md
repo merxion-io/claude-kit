@@ -153,7 +153,8 @@ The observer may press in an executor's window only with `claude-role press "<ex
   SIGTERM, then SIGKILL; the output lists them. User-wide daemons (`roles.USER_WIDE`: the rootless podman pause process
   `catatonit`, gpg-agent, ssh-agent, dbus-daemon) and what runs under them are never its, here and in the leftover guard. A container monitor
   (`roles.CONTAINER_MONITORS`: `conmon`) and its subtree stay too: close reports it as `container <name or id> (conmon <pid>)`,
-  the leftover guard lists it so. A hook that detaches work (`hooks/sessionend.sh`) drops these marks. Containers labelled `claude_executor=<name>` are reported, not removed.
+  the leftover guard lists it so. A process that hosts another claude (`roles.hosting`: a tmux server it started with
+  setsid that now holds another session's pane) and what runs under it are never its either, here and in the guard. A hook that detaches work (`hooks/sessionend.sh`) drops these marks. Containers labelled `claude_executor=<name>` are reported, not removed.
 
 ## Guards on the observer
 

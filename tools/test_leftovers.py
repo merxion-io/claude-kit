@@ -147,6 +147,27 @@ class StopGuard(Case):
         self.assertNotIn(f'{daemon} · ', block['reason'])
         self.assertNotIn(f'{child} · ', block['reason'])
 
+    def test_a_host_of_another_claude_it_started_does_not_hold_the_stop_its_other_orphan_does(self):
+        # a tmux server the executor started with setsid that now holds another session's pane: here a setsid bash with
+        # a child named claude
+        host = os.path.join(self.home, 'host.sh')
+        with open(host, 'w') as f:
+            f.write('bash -c "exec -a claude sleep 7317" & wait\n')
+        executor = Dummy(self, 'executor', 'e', [f'(setsid bash {host} &)', '(setsid sleep 7318 &)'])
+        deadline, hosted = time.time() + 5, []
+        while time.time() < deadline and not hosted:  # the host starts its child, then the child execs
+            procs = roles.processes()
+            hosted = [p for p, (ppid, argv) in procs.items() if ppid in executor.orphans and argv == ['claude', '7317']]
+        claude, = hosted
+        self.addCleanup(with_gone, os.kill, claude, signal.SIGKILL)
+        server, = [p for p in executor.orphans if procs[p][1] == ['bash', host]]
+        orphan, = [p for p in executor.orphans if p != server]
+        block, out = executor.stop()
+        self.assertIsNotNone(block, out)
+        self.assertIn(f'{orphan} · ', block['reason'])
+        self.assertNotIn(f'{server} · ', block['reason'])
+        self.assertNotIn(f'{claude} · ', block['reason'])
+
     def test_a_container_monitor_it_started_and_its_subtree_are_listed_once_as_its_container(self):
         under = os.path.join(self.home, 'under-monitor.sh')
         with open(under, 'w') as f:

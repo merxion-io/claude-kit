@@ -517,14 +517,17 @@ def tree_of(pane):
 def end_leftovers(name, claude, born, tree):
     """Claude is gone: what it left running ends — its tree taken before the exit and the orphans carrying its marks
     (roles.orphans), each only while it is the same process (start time); SIGTERM, LEFTOVER_WAIT, SIGKILL. No pattern,
-    nothing else; user-wide daemons and container monitors (roles.USER_WIDE, roles.CONTAINER_MONITORS) and their subtrees
-    stay. Its PID is a live process again with no start known: no orphan is its.
+    nothing else; user-wide daemons, container monitors and hosts of another claude (roles.USER_WIDE,
+    roles.CONTAINER_MONITORS, roles.hosting) and their subtrees stay. Its PID is a live process again with no start
+    known: no orphan is its.
     → (["<pid> <command>"] ended, ["container <name or id> (conmon <pid>)"] still running)."""
     procs = processes()
     if claude is not None and (born is not None or claude not in procs):
         tree = {**(tree or {}), **{p: roles.started(p) for p in roles.orphans(claude, name, born or 0, procs)}}
     mine = {p: t for p, t in (tree or {}).items()
             if t is not None and roles.started(p) == t and not roles.user_wide(p, claude, procs)}
+    hosts = roles.hosting(set(mine), claude, procs)
+    mine = {p: t for p, t in mine.items() if p not in hosts}
     monitors = {m for m in (roles.container_monitor(p, claude, procs) for p in mine) if m is not None}
     mine = {p: t for p, t in mine.items() if roles.container_monitor(p, claude, procs) is None}
     said = [f'{p} {" ".join(procs.get(p, (0, []))[1])}'.strip() for p in sorted(mine)]

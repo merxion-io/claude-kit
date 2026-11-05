@@ -422,6 +422,27 @@ class CloseLive(unittest.TestCase):
             self.assertEqual((roles.started(spared), procs.get(spared, (0, []))[1]), (started[spared], argv), out)
             self.assertNotIn(f'{spared} {" ".join(argv)}', out)
 
+    def test_close_spares_a_host_of_another_claude_and_its_subtree_and_ends_its_other_orphan(self):
+        # a tmux server the executor started with setsid that now holds another session's pane: here a setsid bash with
+        # a child named claude; a plain setsid orphan of the same executor beside it
+        host = f'{self.state}/host.sh'
+        with open(host, 'w') as f:
+            f.write('bash -c "exec -a claude sleep 7363" & echo $! >> $LAB_PIDS; wait\n')
+        started = dict(self.started_kids(f'(setsid bash {host} & echo $! >> $LAB_PIDS); '
+                                         '(setsid sleep 7362 & echo $! >> $LAB_PIDS); wait', 3))
+        procs = roles.processes()
+        by_argv = {' '.join(procs[p][1]): p for p in started}
+        server, claude, orphan = by_argv[f'bash {host}'], by_argv['claude 7363'], by_argv['sleep 7362']
+        self.assertEqual(procs[claude][0], server)
+        code, out = self.role('close', 'e')
+        self.assertEqual(code, 0, out)
+        procs = roles.processes()
+        self.assertEqual(procs.get(orphan, (0, []))[1], [], out)  # gone or a zombie
+        self.assertIn(f'{orphan} sleep 7362', out)
+        for spared, argv in ((server, f'bash {host}'), (claude, 'claude 7363')):
+            self.assertEqual(roles.started(spared), started[spared], out)
+            self.assertNotIn(f'{spared} {argv}', out)
+
     def test_close_spares_a_container_monitor_and_its_subtree_and_reports_its_container(self):
         # podman's conmon leaves the tree with the executor's marks; here a setsid one of that name, with a child
         under = f'{self.state}/under-monitor.sh'

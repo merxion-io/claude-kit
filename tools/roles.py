@@ -349,6 +349,26 @@ def container_monitor(pid, claude, procs):
     return _named_above(pid, claude, procs, CONTAINER_MONITORS)
 
 
+def hosting(mine, claude, procs):
+    """Of mine, what hosts a claude other than this one and what runs under it within mine: a tmux server the session
+    started with setsid that now holds another session's pane carries its marks, yet killing it or any process between
+    it and that claude ends that session. A process above this claude is out of mine, so never one of these."""
+    held = set()
+    for pid, (ppid, argv) in procs.items():
+        if pid != claude and is_claude(argv):
+            while ppid > 1 and ppid in procs and ppid not in held:
+                held.add(ppid)
+                ppid = procs[ppid][0]
+    spared = set()
+    for pid in mine:
+        up = pid
+        while up in mine and up not in held:
+            up = procs.get(up, (None,))[0]
+        if up in mine:
+            spared.add(pid)
+    return spared
+
+
 def command(pid, procs):
     """How a process is named to the session: a container monitor as "container <name or id> (conmon <pid>)", from its
     -n/--name, else -c/--cid argument; anything else (a monitor naming neither too) as its command line."""
@@ -399,13 +419,14 @@ def orphans(claude, name, born, procs):
 
 def leftovers(claude, name, procs = None):
     """What the model of this claude started that still lives → [(pid, age s, command)]: the subtrees of its Bash-tool
-    shells (not the shells) and its orphans, user-wide daemons and their subtrees aside; a container monitor's subtree
-    as the monitor once."""
+    shells (not the shells) and its orphans, user-wide daemons, hosts of another claude (hosting) and their subtrees
+    aside; a container monitor's subtree as the monitor once."""
     procs = processes() if procs is None else procs
     born, now = started(claude) or 0, time.time()
     shells = {p for p, (ppid, argv) in procs.items() if ppid == claude and BASH_TOOL_SHELL in ' '.join(argv)}
     mine = {p for p in procs if p not in shells and any(descends(p, s, procs) for s in shells)}
     mine |= set(orphans(claude, name, born, procs))
+    mine -= hosting(mine, claude, procs)
     mine = {container_monitor(p, claude, procs) or p for p in mine if not user_wide(p, claude, procs)}
     return [(p, round(now - (started(p) or now)), command(p, procs)) for p in sorted(mine)]
 
