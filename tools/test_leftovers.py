@@ -132,6 +132,19 @@ class StopGuard(Case):
         self.assertIsNotNone(block, out)
         self.assertIn(f'{orphan} · ', block['reason'])
 
+    def test_a_user_wide_daemon_it_started_does_not_hold_the_stop(self):
+        # the rootless podman pause process shows as "catatonit -P": every rootless container of the user runs under it
+        executor = Dummy(self, 'executor', 'e', ['exec -a catatonit sleep 7313', 'sleep 7314'])
+        deadline, daemon = time.time() + 5, []
+        while time.time() < deadline and not daemon:  # the subshell execs it a moment after it is up
+            procs = roles.processes()
+            daemon = [k for k in executor.kids if procs.get(k, (0, []))[1] == ['catatonit', '7313']]
+        daemon, = daemon
+        block, out = executor.stop()
+        self.assertIsNotNone(block, out)
+        self.assertIn('sleep 7314', block['reason'])
+        self.assertNotIn(f'{daemon} · ', block['reason'])
+
     def test_stop_hook_active_passes_and_the_executor_wakes_with_the_list(self):
         executor = Dummy(self, 'executor', 'e', ['sleep 7303'])
         block, out = executor.stop(stop_hook_active = True, background_tasks = [{'type': 'subagent', 'description': 'Build X'}])

@@ -317,6 +317,13 @@ def _live_before_pid_label(pane, role, procs):
 # Leftovers: what the model of a claude started that still lives. Rule chosen on a real tree: claude's direct children
 # are MCP servers, hooks and Bash-tool shells; only Bash-tool shells (argv sources shell-snapshots/snapshot-) are the model's.
 BASH_TOOL_SHELL = '/shell-snapshots/snapshot-'
+# One per user, shared by all its sessions, whoever started it: never a session's leftover, by argv[0] name. The rootless
+# podman pause process ("catatonit -P") holds the namespace of every rootless container of the user.
+USER_WIDE = ('catatonit', 'gpg-agent', 'ssh-agent', 'dbus-daemon')
+
+
+def user_wide(argv):
+    return bool(argv) and os.path.basename(argv[0]) in USER_WIDE
 
 
 def started(pid):
@@ -347,36 +354,23 @@ def role_mark(pid):
                                       env.get(b'CLAUDE_ROLE_NAME', b'').decode(errors = 'replace'))
 
 
-def holders(procs):
-    """Ancestors of every claude (pane shells, tmux servers): they host sessions, a session never owns them."""
-    held = set()
-    for pid, (ppid, argv) in procs.items():
-        if is_claude(argv):
-            while ppid > 1 and ppid in procs and ppid not in held:
-                held.add(ppid)
-                ppid = procs[ppid][0]
-    return held
-
-
 def orphans(claude, name, born, procs):
     """Processes out of the tree of this claude that carry its marks and started after it (no reused PID): Linux only."""
     if not sys.platform.startswith('linux'):
         return []
-    held, me = holders(procs), os.getpid()
-    return [p for p in procs if p != me and p != claude and p not in held and not descends(p, claude, procs)
+    return [p for p in procs if p != claude and not descends(p, claude, procs)
             and role_mark(p) == (str(claude), name) and (started(p) or 0) >= born]
 
 
 def leftovers(claude, name, procs = None):
     """What the model of this claude started that still lives → [(pid, age s, command)]: the subtrees of its Bash-tool
-    shells (not the shells) and its orphans."""
+    shells (not the shells) and its orphans, user-wide daemons aside."""
     procs = processes() if procs is None else procs
     born, now = started(claude) or 0, time.time()
     shells = {p for p, (ppid, argv) in procs.items() if ppid == claude and BASH_TOOL_SHELL in ' '.join(argv)}
     mine = {p for p in procs if p not in shells and any(descends(p, s, procs) for s in shells)}
     mine |= set(orphans(claude, name, born, procs))
-    mine.discard(os.getpid())
-    return [(p, round(now - (started(p) or now)), ' '.join(procs[p][1])) for p in sorted(mine)]
+    return [(p, round(now - (started(p) or now)), ' '.join(procs[p][1])) for p in sorted(mine) if not user_wide(procs[p][1])]
 
 
 def elapsed(seconds):

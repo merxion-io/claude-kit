@@ -384,6 +384,47 @@ class CloseLive(unittest.TestCase):
                 self.assertEqual([t.poll() for t in twins], [None, None], 'the same command outside the tree lives')
                 self.tmux('set-environment', '-g', '-u', 'LAB_KIDS')
 
+    def started_kids(self, script, count):
+        """An executor whose claude runs the bash script (it appends PIDs to $LAB_PIDS) → [(pid, start)] once all are up;
+        teardown kills each that is still the same process."""
+        pids = os.path.join(self.state, 'kids')
+        self.tmux('set-environment', '-g', 'LAB_KIDS', f'LAB_PIDS={pids}; {script}')
+        self.start('e', 'executor e --to obs')
+        deadline, kids = time.time() + 5, []
+        while time.time() < deadline and len(kids) < count:
+            time.sleep(0.05)
+            with contextlib.suppress(OSError), open(pids) as f:
+                kids = [int(p) for p in f.read().split()]
+        self.assertEqual(len(kids), count)
+        time.sleep(0.2)  # the execs after the echo are done
+        kids = [(k, roles.started(k)) for k in kids]
+        for kid, born in kids:
+            self.addCleanup(lambda k, t: roles.started(k) == t and os.kill(k, signal.SIGKILL), kid, born)
+        return kids
+
+    def test_close_spares_a_user_wide_daemon_the_executor_started(self):
+        # the rootless podman pause process shows as "catatonit -P" and leaves the tree: here a setsid one of that name
+        (kid, _), (daemon, born) = self.started_kids('sleep 7353 & echo $! >> $LAB_PIDS; '
+                                                     '(setsid bash -c "exec -a catatonit sleep 7354" & echo $! >> $LAB_PIDS); wait', 2)
+        self.assertEqual(roles.processes()[daemon][1], ['catatonit', '7354'])
+        self.assertFalse(roles.descends(daemon, int(next(p for s, _, p in self.panes() if s == 'e')), roles.processes()))
+        code, out = self.role('close', 'e')
+        self.assertEqual(code, 0, out)
+        procs = roles.processes()
+        self.assertEqual(procs.get(kid, (0, []))[1], [], out)  # gone or a zombie
+        self.assertEqual((roles.started(daemon), procs[daemon][1]), (born, ['catatonit', '7354']), out)
+        self.assertNotIn(f'{daemon} catatonit', out)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'the ignored signal is read from /proc')
+    def test_close_kills_a_leftover_that_ignores_sigterm(self):
+        (kid, _), = self.started_kids('bash -c \'trap "" TERM; exec sleep 7355\' & echo $! >> $LAB_PIDS; wait', 1)
+        with open(f'/proc/{kid}/status') as f:  # the fixture really ignores SIGTERM (bit 15 of SigIgn)
+            self.assertTrue(int(next(l.split()[1] for l in f if l.startswith('SigIgn:')), 16) & 1 << signal.SIGTERM - 1)
+        code, out = self.role('close', 'e')
+        self.assertEqual(code, 0, out)
+        self.assertIn('sleep 7355', out)
+        self.assertEqual(roles.processes().get(kid, (0, []))[1], [], out)  # gone or a zombie
+
     def test_close_spares_the_checkpoint_the_session_end_hook_detaches(self):
         home, pid_file = f'{self.state}/home', f'{self.state}/watch.pid'
         os.makedirs(f'{home}/.claude/tools')
@@ -430,6 +471,19 @@ class CloseLive(unittest.TestCase):
                 self.assertEqual((code, '"e": closed' in out), (0, True), out)
                 self.assertEqual(self.team(), {})
                 self.assertNotIn('e', [s for s, *_ in self.panes()])
+
+
+class EndLeftovers(unittest.TestCase):
+    def test_a_pid_whose_start_differs_from_the_snapshot_is_another_process_and_lives(self):
+        # what close took before /exit ended and its PID went to another process: a start time other than the snapshot
+        other = subprocess.Popen(['sleep', '7356'])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        born = roles.started(other.pid)
+        self.assertEqual(launcher.end_leftovers('e', None, None, {other.pid: born - 5}), [])
+        self.assertIsNone(other.poll())
+        self.assertEqual(launcher.end_leftovers('e', None, None, {other.pid: born}), [f'{other.pid} sleep 7356'])
+        self.assertEqual(other.wait(5), -signal.SIGTERM)
 
 
 LIVE, DEAD = PROCS, {90: PROCS[90]}
