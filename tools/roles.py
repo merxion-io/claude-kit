@@ -323,14 +323,42 @@ BASH_TOOL_SHELL = '/shell-snapshots/snapshot-'
 USER_WIDE = ('catatonit', 'gpg-agent', 'ssh-agent', 'dbus-daemon')
 
 
-def user_wide(pid, claude, procs):
-    """The process or an ancestor of it below this claude is a user-wide daemon; a daemon above the claude hosts it."""
+# Close spares, the guard lists: a container's monitor lives as long as its container, which close only reports (podman's
+# conmon inherits the caller's environment, so it carries the session's marks).
+CONTAINER_MONITORS = ('conmon',)
+
+
+def _named_above(pid, claude, procs, names):
+    """The process or its nearest ancestor below this claude whose argv[0] name is one of names → its PID; none → None.
+    A process above the claude hosts the session, it is not under it."""
     while pid > 1 and pid in procs and pid != claude:
         argv = procs[pid][1]
-        if argv and os.path.basename(argv[0]) in USER_WIDE:
-            return True
+        if argv and os.path.basename(argv[0]) in names:
+            return pid
         pid = procs[pid][0]
-    return False
+    return None
+
+
+def user_wide(pid, claude, procs):
+    """The process is a user-wide daemon or runs under one."""
+    return _named_above(pid, claude, procs, USER_WIDE) is not None
+
+
+def container_monitor(pid, claude, procs):
+    """The container monitor the process is or runs under → its PID; none → None."""
+    return _named_above(pid, claude, procs, CONTAINER_MONITORS)
+
+
+def command(pid, procs):
+    """How a process is named to the session: a container monitor as "container <name or id> (conmon <pid>)", from its
+    -n/--name, else -c/--cid argument; anything else (a monitor naming neither too) as its command line."""
+    argv = procs[pid][1]
+    if argv and os.path.basename(argv[0]) in CONTAINER_MONITORS:
+        for flags in (('-n', '--name'), ('-c', '--cid')):
+            value = next((argv[i + 1] for i, a in enumerate(argv[:-1]) if a in flags), None)
+            if value:
+                return f'container {value} ({os.path.basename(argv[0])} {pid})'
+    return ' '.join(argv)
 
 
 def started(pid):
@@ -377,7 +405,7 @@ def leftovers(claude, name, procs = None):
     shells = {p for p, (ppid, argv) in procs.items() if ppid == claude and BASH_TOOL_SHELL in ' '.join(argv)}
     mine = {p for p in procs if p not in shells and any(descends(p, s, procs) for s in shells)}
     mine |= set(orphans(claude, name, born, procs))
-    return [(p, round(now - (started(p) or now)), ' '.join(procs[p][1])) for p in sorted(mine)
+    return [(p, round(now - (started(p) or now)), command(p, procs)) for p in sorted(mine)
             if not user_wide(p, claude, procs)]
 
 

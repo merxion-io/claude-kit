@@ -151,7 +151,9 @@ The observer may press in an executor's window only with `claude-role press "<ex
 - After its claude is gone, on both paths, close ends what it left running and only that: its process tree taken before
   `/exit` and the reparented processes carrying its `CLAUDE_ROLE_PID` and name (Linux), each checked by start time;
   SIGTERM, then SIGKILL; the output lists them. User-wide daemons (`roles.USER_WIDE`: the rootless podman pause process
-  `catatonit`, gpg-agent, ssh-agent, dbus-daemon) and what runs under them are never its, here and in the leftover guard. A hook that detaches work (`hooks/sessionend.sh`) drops these marks. Containers labelled `claude_executor=<name>` are reported, not removed.
+  `catatonit`, gpg-agent, ssh-agent, dbus-daemon) and what runs under them are never its, here and in the leftover guard. A container monitor
+  (`roles.CONTAINER_MONITORS`: `conmon`) and its subtree stay too: close reports it as `container <name or id> (conmon <pid>)`,
+  the leftover guard lists it so. A hook that detaches work (`hooks/sessionend.sh`) drops these marks. Containers labelled `claude_executor=<name>` are reported, not removed.
 
 ## Guards on the observer
 

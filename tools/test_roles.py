@@ -422,6 +422,26 @@ class CloseLive(unittest.TestCase):
             self.assertEqual((roles.started(spared), procs.get(spared, (0, []))[1]), (started[spared], argv), out)
             self.assertNotIn(f'{spared} {" ".join(argv)}', out)
 
+    def test_close_spares_a_container_monitor_and_its_subtree_and_reports_its_container(self):
+        # podman's conmon leaves the tree with the executor's marks; here a setsid one of that name, with a child
+        under = f'{self.state}/under-monitor.sh'
+        with open(under, 'w') as f:
+            f.write('sleep 7358 & echo $! >> $LAB_PIDS; wait\n')
+        started = dict(self.started_kids('sleep 7359 & echo $! >> $LAB_PIDS; (setsid bash -c "exec -a conmon bash '
+                                         f'{under} -c cid7358" & echo $! >> $LAB_PIDS); wait', 3))
+        procs = roles.processes()
+        by_argv = {' '.join(procs[p][1]): p for p in started}
+        kid, monitor, child = by_argv['sleep 7359'], by_argv[f'conmon {under} -c cid7358'], by_argv['sleep 7358']
+        self.assertEqual(procs[child][0], monitor)
+        code, out = self.role('close', 'e')
+        self.assertEqual(code, 0, out)
+        procs = roles.processes()
+        self.assertEqual(procs.get(kid, (0, []))[1], [], out)  # gone or a zombie
+        for spared in (monitor, child):
+            self.assertEqual(roles.started(spared), started[spared], out)
+        self.assertIn(f'"e": its containers still run, not removed: container cid7358 (conmon {monitor})', out)
+        self.assertNotIn(f'{child} sleep 7358', out)
+
     @unittest.skipUnless(sys.platform.startswith('linux'), 'the ignored signal is read from /proc')
     def test_close_kills_a_leftover_that_ignores_sigterm(self):
         (kid, _), = self.started_kids('bash -c \'trap "" TERM; exec sleep 7355\' & echo $! >> $LAB_PIDS; wait', 1)
@@ -487,9 +507,9 @@ class EndLeftovers(unittest.TestCase):
         self.addCleanup(other.wait)
         self.addCleanup(other.kill)
         born = roles.started(other.pid)
-        self.assertEqual(launcher.end_leftovers('e', None, None, {other.pid: born - 5}), [])
+        self.assertEqual(launcher.end_leftovers('e', None, None, {other.pid: born - 5}), ([], []))
         self.assertIsNone(other.poll())
-        self.assertEqual(launcher.end_leftovers('e', None, None, {other.pid: born}), [f'{other.pid} sleep 7356'])
+        self.assertEqual(launcher.end_leftovers('e', None, None, {other.pid: born}), ([f'{other.pid} sleep 7356'], []))
         self.assertEqual(other.wait(5), -signal.SIGTERM)
 
 

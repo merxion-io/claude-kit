@@ -517,14 +517,18 @@ def tree_of(pane):
 def end_leftovers(name, claude, born, tree):
     """Claude is gone: what it left running ends — its tree taken before the exit and the orphans carrying its marks
     (roles.orphans), each only while it is the same process (start time); SIGTERM, LEFTOVER_WAIT, SIGKILL. No pattern,
-    nothing else; user-wide daemons (roles.USER_WIDE) and their subtrees stay. Its PID is a live process again with no start known: no
-    orphan is its. → ["<pid> <command>"]."""
+    nothing else; user-wide daemons and container monitors (roles.USER_WIDE, roles.CONTAINER_MONITORS) and their subtrees
+    stay. Its PID is a live process again with no start known: no orphan is its.
+    → (["<pid> <command>"] ended, ["container <name or id> (conmon <pid>)"] still running)."""
     procs = processes()
     if claude is not None and (born is not None or claude not in procs):
         tree = {**(tree or {}), **{p: roles.started(p) for p in roles.orphans(claude, name, born or 0, procs)}}
     mine = {p: t for p, t in (tree or {}).items()
             if t is not None and roles.started(p) == t and not roles.user_wide(p, claude, procs)}
+    monitors = {m for m in (roles.container_monitor(p, claude, procs) for p in mine) if m is not None}
+    mine = {p: t for p, t in mine.items() if roles.container_monitor(p, claude, procs) is None}
     said = [f'{p} {" ".join(procs.get(p, (0, []))[1])}'.strip() for p in sorted(mine)]
+    kept = [roles.command(m, procs) for m in sorted(monitors)]
     for sign in (signal.SIGTERM, signal.SIGKILL):
         for p in mine:
             with contextlib.suppress(ProcessLookupError):
@@ -536,7 +540,7 @@ def end_leftovers(name, claude, born, tree):
         mine = {p: t for p, t in mine.items() if roles.started(p) == t}
         if not mine:
             break
-    return said
+    return said, kept
 
 
 def labelled_containers(name):
@@ -627,9 +631,11 @@ def close(argv):
         if why:
             raise Refusal(f'"{name}": not closed: {why}')
         exit_forced(me, name, pane) if force else exit_normally(name, pane_id)
-    ended_ones = end_leftovers(name, claude, born, tree)
+    ended_ones, kept = end_leftovers(name, claude, born, tree)
     if ended_ones:
         print(f'"{name}": ended what it left running: ' + '; '.join(ended_ones))
+    if kept:
+        print(f'"{name}": its containers still run, not removed: ' + ', '.join(kept))
     containers = labelled_containers(name)
     if containers:
         print(f'"{name}": its labelled containers still run, not removed: ' + ', '.join(containers))
