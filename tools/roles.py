@@ -431,25 +431,47 @@ def leftovers(claude, name, procs = None):
     return [(p, round(now - (started(p) or now)), command(p, procs)) for p in sorted(mine)]
 
 
-# A background Bash task (or Monitor) runs in a Bash-tool shell whose stdout and stderr are the task's output file
+# A background Bash task runs in a Bash-tool shell whose stdout and stderr are the task's output file
 # <tmp>/claude-<uid>/<project>/<session_id>/tasks/<id>.output; a subagent has the same file (a link), with no shell.
+# A Monitor's shell writes to a socket: it is known only by its argv, which holds the command as
+# "eval <shlex-quoted command> < /dev/null" (measured 2026-11-05).
 TASK_OUTPUT = re.compile(r'/tasks/([^/]+)\.output$')
 
 
-def task_shells(claude, procs):
-    """Bash-tool shells of this claude that run a background task → {task id: (shell PID, output file)}, by the shell's
-    stdout link (Linux /proc; elsewhere none)."""
+def _output_link(pid):
+    """The output file a Bash-tool shell's stdout links to → (task id, path); none, unreadable → None."""
+    try:
+        out = os.readlink(f'/proc/{pid}/fd/1')
+    except OSError:
+        return None
+    match = TASK_OUTPUT.search(out)
+    return (match.group(1), out) if match else None
+
+
+def task_shells(claude, procs, tasks = ()):
+    """Bash-tool shells of this claude that run a background task → {task id: (shell PID, output file or None)}: by the
+    shell's stdout link (Linux /proc); a task of the Stop input with no link, by its `command` in a shell's argv
+    (eval <quoted command> < /dev/null), each shell once; no command → unmatched."""
+    shells = {p: ' '.join(argv) for p, (ppid, argv) in procs.items() if ppid == claude and BASH_TOOL_SHELL in ' '.join(argv)}
     found = {}
-    for pid, (ppid, argv) in procs.items():
-        if ppid != claude or BASH_TOOL_SHELL not in ' '.join(argv):
+    for pid in sorted(shells):
+        link = _output_link(pid)
+        if link:
+            found[link[0]] = (pid, link[1])
+    return _by_command(tasks, found, shells)
+
+
+def _by_command(tasks, found, shells):
+    """The tasks not in found, tied to the free shell {PID: argv line} whose argv runs their command; found grows."""
+    free = [p for p in sorted(shells) if p not in {pid for pid, _ in found.values()}]
+    for task in tasks:
+        if task.get('id') in found or not task.get('command'):
             continue
-        try:
-            out = os.readlink(f'/proc/{pid}/fd/1')
-        except OSError:
-            continue
-        match = TASK_OUTPUT.search(out)
-        if match:
-            found[match.group(1)] = (pid, out)
+        line = f'eval {shlex.quote(task["command"])} < /dev/null'
+        pid = next((p for p in free if line in shells[p]), None)
+        if pid is not None:
+            found[task['id']] = (pid, None)
+            free.remove(pid)
     return found
 
 
@@ -505,7 +527,7 @@ def background(tasks, session_id = None, claude = None, name = None, procs = Non
     shells, rest = {}, []
     if claude is not None:
         procs = processes() if procs is None else procs
-        shells, rest = task_shells(claude, procs), leftovers(claude, name, procs)
+        shells, rest = task_shells(claude, procs, tasks), leftovers(claude, name, procs)
     folded, orphaned = fold(tasks, {i: pid for i, (pid, _) in shells.items()}, rest, procs)
     now, lines = time.time(), []
     for task, count in folded:

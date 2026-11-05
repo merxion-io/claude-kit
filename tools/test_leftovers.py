@@ -17,10 +17,10 @@ loader.exec_module(waiter)
 
 SESSION = 's'
 # argv: hook path. Sets its own role PID mark, starts each command of LAB_KIDS in a Bash-tool shell and each [id, command]
-# of LAB_TASKS in a Bash-tool shell writing to $TMPDIR/claude-<uid>/<project>/<session>/tasks/<id>.output, prints the
-# shell PIDs; then each stdin line is a hook input: the hook runs through sh -c (as claude runs hooks), its stdout is printed.
+# of LAB_TASKS in a Bash-tool shell writing to $TMPDIR/claude-<uid>/<project>/<session>/tasks/<id>.output, each command
+# of LAB_MONITORS in a Bash-tool shell writing to a pipe with the command quoted in its argv, prints the shell PIDs; then each stdin line is a hook input: the hook runs through sh -c (as claude runs hooks), its stdout is printed.
 DUMMY = r"""#!/usr/bin/env python3
-import json, os, subprocess, sys
+import json, os, shlex, subprocess, sys
 os.environ['CLAUDE_ROLE_PID'] = str(os.getpid())
 snapshot = f'source {os.environ["LAB_SNAPSHOT"]} 2>/dev/null'
 shells = [subprocess.Popen(['bash', '-c', f'{snapshot}; {cmd} & wait'],
@@ -31,6 +31,9 @@ for task, cmd in json.loads(os.environ.get('LAB_TASKS', '[]')):
     with open(os.path.join(tasks, f'{task}.output'), 'w') as out:
         shells.append(subprocess.Popen(['bash', '-c', f'{snapshot}; {cmd}; status=$?'], stdin = subprocess.DEVNULL, stdout = out,
                                        stderr = out))
+for cmd in json.loads(os.environ.get('LAB_MONITORS', '[]')):  # a Monitor's shell: stdout a pipe, the command in its argv
+    shells.append(subprocess.Popen(['bash', '-c', f'{snapshot}; eval {shlex.quote(cmd)} < /dev/null && pwd -P >| /dev/null'],
+                                   stdin = subprocess.DEVNULL, stdout = subprocess.PIPE, stderr = subprocess.PIPE))
 servers = [subprocess.Popen(['bash', '-c', f'{c} & wait'], stdout = subprocess.DEVNULL) for c in json.loads(os.environ.get('LAB_MCP', '[]'))]
 print(json.dumps([s.pid for s in shells]), flush = True)
 for line in sys.stdin:
@@ -45,13 +48,14 @@ AGE = r'\d\d:\d\d:\d\d'
 class Dummy:
     """A dummy claude of a role with its children; stop() runs the real Stop hook as that session."""
     def __init__(self, case, role, name, kids = (), hook = os.path.join(KIT, 'hooks/role-state.py'), mcp = (), tasks = (),
-                 expect = None):
+                 monitors = (), expect = None):
         self.name = name
         env = {k: v for k, v in os.environ.items() if not k.startswith(('TMUX', 'CLAUDE_'))}
         env.update(CLAUDE_ROLE = role, CLAUDE_ROLE_NAME = name, TMUX_PANE = '%1', CLAUDE_ROLES_STATE_DIR = case.home,
                    PATH = f'{case.bin}:{env["PATH"]}', LAB_TMUX_LOG = case.tmux_log, LAB_KIDS = json.dumps(list(kids)),
                    LAB_SNAPSHOT = case.snapshot, LAB_MCP = json.dumps(list(mcp)), TMPDIR = case.tmp,
-                   LAB_TASK_DIR = case.task_dir, LAB_TASKS = json.dumps([list(t) for t in tasks]))
+                   LAB_TASK_DIR = case.task_dir, LAB_TASKS = json.dumps([list(t) for t in tasks]),
+                   LAB_MONITORS = json.dumps(list(monitors)))
         self.proc = subprocess.Popen([os.path.join(case.bin, 'claude'), hook], env = env,
                                      stdin = subprocess.PIPE, stdout = subprocess.PIPE, text = True)
         case.addCleanup(self.close)
@@ -173,6 +177,28 @@ class StopNeverBlocks(Case):
             time.sleep(0.5)
         procs = roles.processes()
         self.assertNotEqual([p for p in procs if procs[p][0] in executor.shells], first, 'the child was replaced')
+
+    def test_a_monitor_shell_with_no_output_file_is_tied_by_its_command_and_its_churning_child_folded(self):
+        watch = "while true; do sleep 0.3; done # it's quoted"
+        executor = Dummy(self, 'executor', 'e', monitors = [watch, watch], expect = 2)
+        for shell in executor.shells:
+            self.assertTrue(os.readlink(f'/proc/{shell}/fd/1').startswith('pipe:'), 'no output file to link by')
+        task = {'type': 'shell', 'description': 'watch', 'command': watch}
+        first = executor.kids
+        for _ in range(2):
+            lines = self.passed(executor, background_tasks = [{'id': 'bm1', **task}, {'id': 'bm2', **task}])
+            self.assertEqual(len(lines), 2, lines)
+            for i, line in enumerate(lines):  # each shell once; the age is the shell's start
+                self.assertRegex(line, rf'^bm{i + 1} · shell · watch · {AGE}( \(\+1 processes\))?$')
+            time.sleep(0.5)
+        procs = roles.processes()
+        self.assertNotEqual([p for p in procs if procs[p][0] in executor.shells], first, 'the children were replaced')
+
+    def test_a_monitor_task_without_a_command_leaves_its_child_an_orphan(self):
+        executor = Dummy(self, 'executor', 'e', monitors = ['sleep 7407'], expect = 1)
+        lines = self.passed(executor, background_tasks = [{'id': 'bm3', 'type': 'shell', 'description': 'quiet'}])
+        self.assertEqual(lines[0], 'bm3 · shell · quiet', 'no link, no command: no shell, no age')
+        self.assertRegex(lines[1], rf'^orphan {executor.kids[0]} · {AGE} · sleep 7407$')
 
     def test_a_shell_of_a_task_not_in_the_input_leaves_orphans(self):
         executor = Dummy(self, 'executor', 'e', tasks = [('bold', 'sleep 7406')], expect = 1)

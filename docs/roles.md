@@ -178,8 +178,10 @@ what its turn leaves running becomes the text of `stopped with background`, one 
 - per background task of the Stop input: `<id> · <type> · <description> · <age> (+N processes)`. The age is the birth
   time of the task's `tasks/<id>.output` under the harness temp root (a background Bash task's shell writes there, a
   subagent has a link there), else its shell's start; the input item has no time field, so with neither there is no
-  age field. What runs under the task's Bash-tool shell (found by its stdout link to that file) is folded into N
-  (`roles.fold`), even a child that churns; N = 0 has no suffix.
+  age field. What runs under the task's Bash-tool shell is folded into N (`roles.fold`), even a child that churns;
+  N = 0 has no suffix. The shell is found by its stdout link to that file; a Monitor's shell writes to a socket, so a
+  task with no link is tied by its `command` field to the shell whose argv holds `eval <quoted command> < /dev/null`
+  (`roles.task_shells`, each shell once); no `command`, no tie, its processes are orphans.
 - then every other process its model started that still lives (`roles.leftovers`: subtrees of its Bash-tool shells,
   reparented processes with its marks; MCP servers and hooks are not the model's) as `orphan <pid> · <age> · <command>`.
 
