@@ -21,7 +21,7 @@ import json, os, subprocess, sys
 os.environ['CLAUDE_ROLE_PID'] = str(os.getpid())
 shells = [subprocess.Popen(['bash', '-c', f'source {os.environ["LAB_SNAPSHOT"]} 2>/dev/null; {cmd} & wait'],
                            stdin = subprocess.DEVNULL, stdout = subprocess.DEVNULL) for cmd in json.loads(os.environ.get('LAB_KIDS', '[]'))]
-servers = [subprocess.Popen(c.split(), stdout = subprocess.DEVNULL) for c in json.loads(os.environ.get('LAB_MCP', '[]'))]
+servers = [subprocess.Popen(['bash', '-c', f'{c} & wait'], stdout = subprocess.DEVNULL) for c in json.loads(os.environ.get('LAB_MCP', '[]'))]
 print(json.dumps([s.pid for s in shells]), flush = True)
 for line in sys.stdin:
     out = subprocess.run(['sh', '-c', f'"{sys.executable}" "{sys.argv[1]}"'], input = line, capture_output = True, text = True)
@@ -147,8 +147,8 @@ class StopGuard(Case):
         self.assertIn('shell · npm run dev', (block or {}).get('reason', ''), out)
 
     def test_an_observer_is_held_by_its_own_child_not_by_its_executors(self):
+        observer = Dummy(self, 'observer', 'o')  # first: its executor's processes are younger, only their marks are not its
         executor = Dummy(self, 'executor', 'e', ['sleep 7304', '(setsid sleep 7305 &)'])
-        observer = Dummy(self, 'observer', 'o')
         self.assertIsNotNone(executor.stop()[0])
         block, out = observer.stop()
         self.assertIsNone(block, out)
@@ -160,9 +160,31 @@ class StopGuard(Case):
 
     def test_harness_children_and_a_clean_tree_do_not_hold(self):
         executor = Dummy(self, 'executor', 'e', mcp = ['sleep 7307'])  # a direct child, not a Bash-tool shell: an MCP server
-        procs = roles.processes()
-        self.assertIn(['sleep', '7307'], [argv for p, (ppid, argv) in procs.items() if ppid == executor.proc.pid])
+        deadline, procs = time.time() + 5, {}
+        while time.time() < deadline and ['sleep', '7307'] not in [argv for _, argv in procs.values()]:
+            time.sleep(0.05)
+            procs = roles.processes()
+        server, = [p for p, (ppid, argv) in procs.items() if argv == ['sleep', '7307']]
+        self.assertTrue(roles.descends(server, executor.proc.pid, procs) and procs[server][0] != executor.proc.pid,
+                        'the server has a child of its own')
         self.assertIsNone(executor.stop()[0])
+
+    def test_a_process_with_its_marks_older_than_its_claude_is_not_its(self):
+        # a reused PID: the marks name this claude's PID, the process started before it
+        forged = subprocess.Popen(['sh', '-c', 'read p; exec env CLAUDE_ROLE_PID=$p CLAUDE_ROLE_NAME=e sleep 7312'],
+                                  stdin = subprocess.PIPE, text = True)
+        self.addCleanup(forged.wait)
+        self.addCleanup(with_gone, forged.kill)
+        time.sleep(0.05)
+        executor = Dummy(self, 'executor', 'e')
+        forged.stdin.write(f'{executor.proc.pid}\n')
+        forged.stdin.close()
+        deadline = time.time() + 5
+        while time.time() < deadline and roles.role_mark(forged.pid) != (str(executor.proc.pid), 'e'):
+            time.sleep(0.05)
+        self.assertEqual(roles.role_mark(forged.pid), (str(executor.proc.pid), 'e'))
+        block, out = executor.stop()
+        self.assertIsNone(block, out)
 
     def test_a_subagent_stop_is_untouched(self):
         executor = Dummy(self, 'executor', 'e', ['sleep 7308'])

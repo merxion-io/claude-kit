@@ -182,6 +182,9 @@ while True:
         if c in '\\r\\n':
             if text == '/exit':
                 hook('SessionEnd', reason = 'prompt_input_exit')
+                if os.environ.get('LAB_END'):  # a shell hook of SessionEnd, run as claude runs hooks: its environment
+                    subprocess.run(['bash', os.environ['LAB_END']], input = '{}', text = True, capture_output = True,
+                                   env = {**os.environ, 'HOME': os.environ['LAB_HOME']})
                 sys.exit(0)
             text = ''
         else:
@@ -381,6 +384,26 @@ class CloseLive(unittest.TestCase):
                 self.assertEqual([t.poll() for t in twins], [None, None], 'the same command outside the tree lives')
                 self.tmux('set-environment', '-g', '-u', 'LAB_KIDS')
 
+    def test_close_spares_the_checkpoint_the_session_end_hook_detaches(self):
+        home, pid_file = f'{self.state}/home', f'{self.state}/watch.pid'
+        os.makedirs(f'{home}/.claude/tools')
+        with open(f'{home}/.claude/tools/session_watch.py', 'w') as f:  # stands for the checkpoint writer it detaches
+            f.write(f'import os, time\nos.setsid()\nopen({pid_file!r}, "w").write(str(os.getpid()))\ntime.sleep(20)\n')
+        for var, value in (('LAB_END', os.path.join(KIT, 'hooks/sessionend.sh')), ('LAB_HOME', home), ('SESSIONEND_MIN', '0')):
+            self.tmux('set-environment', '-g', var, value)
+        self.start('e', 'executor e --to obs')
+        code, out = self.role('close', 'e')
+        deadline = time.time() + 5
+        while time.time() < deadline and not os.path.exists(pid_file):
+            time.sleep(0.05)
+        time.sleep(0.2)
+        with open(pid_file) as f:
+            watch = int(f.read())
+        born = roles.started(watch)
+        self.addCleanup(lambda: born is not None and roles.started(watch) == born and os.kill(watch, signal.SIGKILL))
+        self.assertEqual(code, 0, out)
+        self.assertIsNotNone(born, f'the session-end checkpoint was ended: {out}')
+
     def raced(self, race, *args):
         out = subprocess.run([sys.executable, '-c', RACE, KIT, race, *args], env = self.observer, capture_output = True, text = True)
         return out.returncode, out.stdout + out.stderr
@@ -564,11 +587,18 @@ class CompactResume(unittest.TestCase):
         self.file = os.path.join(self.cwd, '.claude', 'checkpoints', 'abcdefgh-session.md')
         os.makedirs(os.path.dirname(self.file))
 
-    def output(self, text):
-        with open(self.file, 'w', encoding = 'utf-8') as f:
-            f.write(text)
+    def output(self, text, role = None):
+        """The hook's stdout with this checkpoint (None: none) in a session of this role (None: no role)."""
+        if text is None:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(self.file)
+        else:
+            with open(self.file, 'w', encoding = 'utf-8') as f:
+                f.write(text)
+        env = role_env(role) if role else {k: v for k, v in os.environ.items() if not k.startswith(('TMUX', 'CLAUDE_'))}
+        env.update(HOME = self.home, PATH = f'{os.path.dirname(sys.executable)}:{os.environ["PATH"]}')  # the kit's python
         return subprocess.run(['bash', os.path.join(KIT, 'hooks/compact-resume.sh')], input = json.dumps({'session_id': 'abcdefgh-1', 'cwd': self.cwd}),
-                              env = {**os.environ, 'HOME': self.home}, capture_output = True, text = True, check = True).stdout
+                              env = env, capture_output = True, text = True, check = True).stdout
 
     def context(self, out):
         return json.loads(out)['hookSpecificOutput']['additionalContext']
@@ -582,6 +612,15 @@ class CompactResume(unittest.TestCase):
                 self.assertGreater(units(out), roles.CONTEXT_LIMIT - 100)
                 self.assertLessEqual(units(self.context(out)), roles.CONTEXT_LIMIT)
                 self.assertEqual(self.context(out).splitlines()[-1], f'--- checkpoint cut here, the rest is in {self.file} ---')
+
+    def test_an_observer_text_ends_with_the_language_line_within_the_limit(self):
+        units = lambda text: len(text.encode('utf-16-le')) // 2
+        for filler in ('short', 'x' * 20000, None):
+            for role, ends in (('observer', True), ('executor', False)):
+                with self.subTest(filler = (filler or '')[:8], role = role):
+                    out = self.output(filler, role)
+                    self.assertEqual(self.context(out).endswith('\n' + roles.OPERATOR_LANGUAGE), ends)
+                    self.assertLess(units(out), roles.CONTEXT_LIMIT)
 
     def test_a_short_checkpoint_arrives_whole(self):
         context = self.context(self.output('line one\nline two'))

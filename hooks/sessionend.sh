@@ -15,5 +15,7 @@ case "${cur:-0}" in ''|*[!0-9]*) cur=0;; esac
 
 # session_watch runs `claude -p`; a session started without nvm in its PATH has no claude here: take it from nvm's node
 command -v claude >/dev/null || for b in "$HOME"/.nvm/versions/node/*/bin; do [ -x "$b/claude" ] && { export PATH="$b:$PATH"; break; }; done
+# The role marks name what the session's model started (claude-role close ends that): this hook's detached work drops them
+unset CLAUDE_ROLE CLAUDE_ROLE_PID CLAUDE_ROLE_NAME
 python3 "$HOME/.claude/tools/session_watch.py" --detach --deadline 200 --session "$sess" --force --quiet >/dev/null 2>&1 &
 exit 0

@@ -21,11 +21,15 @@ cp_file=""; [ -n "$sess" ] && cp_file="$dir/$sess-session.md"
 # manual agent notes (`<sess>-<topic>.md`) — paths only: the agent writes them, and they hold decisions that may be missing from the digest
 manual="$(ls -t "$dir/$sess"-*.md 2>/dev/null | grep -v -- '-session\.md$' | head -5 | tr '\n' ' ')"
 
+# An observer's text ends with the operator-language line (roles.for_role); any other session's gets nothing
+tail="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import roles; print(roles.for_role(roles.role_session(), ""), end = "")' \
+  "$(dirname "$0")/../tools" 2>/dev/null)"
+
 base='The context was just compacted. Treat the summary as incomplete: restore the working state from durable sources and continue the interrupted task (git status --short: uncommitted; the spec of the project (its CLAUDE.md names where): the truth about behaviour). The checkpoint is written by another model from a digest: check each "done" in it against the files and git before relying on it.'
 [ -n "$sess" ] && [ -n "$manual" ] && base="$base Manual notes of this session, read them: $manual"
 if [ -n "$cp_file" ] && [ -s "$cp_file" ]; then
-  jq -rn --arg base "$base" --arg file "$cp_file" --rawfile body "$cp_file" '
-    def output($c): {hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}} | tojson;
+  jq -rn --arg base "$base" --arg file "$cp_file" --arg tail "$tail" --rawfile body "$cp_file" '
+    def output($c): {hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:($c + $tail)}} | tojson;
     ($base + "\n\n--- CHECKPOINT OF THIS SESSION (" + $file + ") ---\n") as $head
     | ("\n--- checkpoint cut here, the rest is in " + $file + " ---") as $cut
     | def cut_at($n): output($head + $body[:$n] + $cut);
@@ -36,5 +40,5 @@ if [ -n "$cp_file" ] && [ -s "$cp_file" ]; then
     output($head + $body + "\n--- end of checkpoint ---") as $whole
     | if ($whole | fits) then $whole else fit(0; $body | length) end'
 else
-  jq -cn --arg c "$base This session has no checkpoint. Do NOT take other files from .claude/checkpoints/: they belong to other tasks." '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
+  jq -cn --arg c "$base This session has no checkpoint. Do NOT take other files from .claude/checkpoints/: they belong to other tasks.$tail" '{hookSpecificOutput:{hookEventName:"SessionStart",additionalContext:$c}}'
 fi
