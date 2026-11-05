@@ -388,7 +388,7 @@ class CloseLive(unittest.TestCase):
         """An executor whose claude runs the bash script (it appends PIDs to $LAB_PIDS) → [(pid, start)] once all are up;
         teardown kills each that is still the same process."""
         pids = os.path.join(self.state, 'kids')
-        self.tmux('set-environment', '-g', 'LAB_KIDS', f'LAB_PIDS={pids}; {script}')
+        self.tmux('set-environment', '-g', 'LAB_KIDS', f'export LAB_PIDS={pids}; {script}')
         self.start('e', 'executor e --to obs')
         deadline, kids = time.time() + 5, []
         while time.time() < deadline and len(kids) < count:
@@ -402,18 +402,25 @@ class CloseLive(unittest.TestCase):
             self.addCleanup(lambda k, t: roles.started(k) == t and os.kill(k, signal.SIGKILL), kid, born)
         return kids
 
-    def test_close_spares_a_user_wide_daemon_the_executor_started(self):
+    def test_close_spares_a_user_wide_daemon_the_executor_started_and_its_subtree(self):
         # the rootless podman pause process shows as "catatonit -P" and leaves the tree: here a setsid one of that name
-        (kid, _), (daemon, born) = self.started_kids('sleep 7353 & echo $! >> $LAB_PIDS; '
-                                                     '(setsid bash -c "exec -a catatonit sleep 7354" & echo $! >> $LAB_PIDS); wait', 2)
-        self.assertEqual(roles.processes()[daemon][1], ['catatonit', '7354'])
-        self.assertFalse(roles.descends(daemon, int(next(p for s, _, p in self.panes() if s == 'e')), roles.processes()))
+        under = f'{self.state}/under-daemon.sh'
+        with open(under, 'w') as f:
+            f.write('sleep 7357 & echo $! >> $LAB_PIDS; wait\n')
+        started = dict(self.started_kids('sleep 7353 & echo $! >> $LAB_PIDS; (setsid bash -c "exec -a catatonit bash '
+                                         f'{under}" & echo $! >> $LAB_PIDS); wait', 3))
+        procs = roles.processes()
+        by_argv = {procs[p][1][0] if procs[p][1][0] == 'catatonit' else ' '.join(procs[p][1]): p for p in started}
+        kid, daemon, child = by_argv['sleep 7353'], by_argv['catatonit'], by_argv['sleep 7357']
+        self.assertEqual(procs[child][0], daemon)
+        self.assertFalse(roles.descends(daemon, int(next(p for s, _, p in self.panes() if s == 'e')), procs))
         code, out = self.role('close', 'e')
         self.assertEqual(code, 0, out)
         procs = roles.processes()
         self.assertEqual(procs.get(kid, (0, []))[1], [], out)  # gone or a zombie
-        self.assertEqual((roles.started(daemon), procs[daemon][1]), (born, ['catatonit', '7354']), out)
-        self.assertNotIn(f'{daemon} catatonit', out)
+        for spared, argv in ((daemon, ['catatonit', under]), (child, ['sleep', '7357'])):
+            self.assertEqual((roles.started(spared), procs.get(spared, (0, []))[1]), (started[spared], argv), out)
+            self.assertNotIn(f'{spared} {" ".join(argv)}', out)
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'the ignored signal is read from /proc')
     def test_close_kills_a_leftover_that_ignores_sigterm(self):

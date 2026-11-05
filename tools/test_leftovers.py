@@ -132,18 +132,20 @@ class StopGuard(Case):
         self.assertIsNotNone(block, out)
         self.assertIn(f'{orphan} · ', block['reason'])
 
-    def test_a_user_wide_daemon_it_started_does_not_hold_the_stop(self):
+    def test_a_user_wide_daemon_it_started_and_its_subtree_do_not_hold_the_stop(self):
         # the rootless podman pause process shows as "catatonit -P": every rootless container of the user runs under it
-        executor = Dummy(self, 'executor', 'e', ['exec -a catatonit sleep 7313', 'sleep 7314'])
-        deadline, daemon = time.time() + 5, []
-        while time.time() < deadline and not daemon:  # the subshell execs it a moment after it is up
+        executor = Dummy(self, 'executor', 'e', ['exec -a catatonit bash -c "sleep 7313 & wait"', 'sleep 7314'])
+        deadline, found = time.time() + 5, []
+        while time.time() < deadline and not found:  # the subshell execs it, then it starts its child
             procs = roles.processes()
-            daemon = [k for k in executor.kids if procs.get(k, (0, []))[1] == ['catatonit', '7313']]
-        daemon, = daemon
+            found = [(k, p) for k in executor.kids if procs.get(k, (0, ['']))[1][0] == 'catatonit'
+                     for p, (ppid, argv) in procs.items() if ppid == k and argv == ['sleep', '7313']]
+        (daemon, child), = found
         block, out = executor.stop()
         self.assertIsNotNone(block, out)
         self.assertIn('sleep 7314', block['reason'])
         self.assertNotIn(f'{daemon} · ', block['reason'])
+        self.assertNotIn(f'{child} · ', block['reason'])
 
     def test_stop_hook_active_passes_and_the_executor_wakes_with_the_list(self):
         executor = Dummy(self, 'executor', 'e', ['sleep 7303'])
