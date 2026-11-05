@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # Observer waiter: Stop hook with asyncRewake. Waits until one of ITS executors (@claude_observer = the
 # observer name) needs attention, and wakes the observer: exit 2, who · state · gist — in stderr (a tell — its full text). Wakes on:
-# asks, waits for permission, stopped (with background or not), broke, hung ("working" without events longer than HANG), died (the claude
+# asks, waits for permission, stopped, broke, hung ("working" without events longer than HANG), stopped with background longer
+# than STALE_BACKGROUND (once per label: the label's own time, read on every poll), died (the claude
 # of this role is not running while the state label stayed — the normal SessionEnd did not erase it; or an executor from the list that
 # has no pane — not closed normally, except those waiting for the revive after a reboot). Does not wake on: works, runs a
-# command, waits for its background. The check runs right at start: what happened while the observer was busy wakes it at once.
+# command, waits for its background, a fresh stop with background (its background wakes the executor itself). The check runs right at start: what happened while the observer was busy wakes it at once.
 # What was seen — the @claude_seen label of the executor pane (the same state label) — does not wake again; death —
 # seen in the list entry, one per launch: died in the pane, then the pane vanished — one wake-up.
 # One waiter: its PID is in the @claude_waiter label of the observer pane, a new one kills the previous by PID.
@@ -13,11 +14,12 @@ import os, signal, sys, time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'tools'))
 import roles
-from roles import SEEN, SEP, WORKING
+from roles import SEEN, SEP, STOPPED_BACKGROUND, WORKING
 
 # Measurement 2026-10-28 on the journals of three executors: "working" without a new event while the model works — up to 64 s
 # (2763 intervals, p99.9 58 s); the threshold was chosen by the observer
 HANG = 120
+STALE_BACKGROUND = 1800  # s: a stop with background this old wakes the observer once, as a check that it is still meant
 POLL = 2
 WAITER = '@claude_waiter'
 
@@ -54,6 +56,8 @@ def attention(me, all_panes, tree, now, team, started):
                     what = SEP.join(label.split(SEP, 2)[:2] + [full])
             elif kind == WORKING and now - since > HANG:
                 key, what = f'hung{SEP}{label}', f'hung: {round(now - since)} s without events · {label}'
+            elif kind == STOPPED_BACKGROUND and now - since > STALE_BACKGROUND:
+                key, what = f'stale{SEP}{label}', f'stopped with background for {round((now - since) / 60)} min · {label}'
             else:
                 continue
         if key != seen:

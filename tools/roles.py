@@ -39,7 +39,7 @@ TELLING = 'telling the observer'  # claude-role tell: a fact or a question witho
 STOPPED = 'stopped'
 BROKEN = 'broke'
 OPENED = 'open'  # session is open and waits for input — does not wake and is not "hung"
-WAKES = (ASKING, PERMISSION, STOPPED, STOPPED_BACKGROUND, BROKEN, TELLING)  # states for which the waiter wakes the observer
+WAKES = (ASKING, PERMISSION, STOPPED, BROKEN, TELLING)  # states for which the waiter wakes the observer (STOPPED_BACKGROUND: once it is stale)
 SEEN = '@claude_seen'  # on the executor pane: the state label the waiter already woke the observer on
 STATE = '@claude_state'
 KILLED = 'other'  # reason in SessionEnd when claude is killed (kill-session, signal); /exit, Ctrl+C — prompt_input_exit
@@ -429,6 +429,90 @@ def leftovers(claude, name, procs = None):
     mine -= hosting(mine, claude, procs)
     mine = {container_monitor(p, claude, procs) or p for p in mine if not user_wide(p, claude, procs)}
     return [(p, round(now - (started(p) or now)), command(p, procs)) for p in sorted(mine)]
+
+
+# A background Bash task (or Monitor) runs in a Bash-tool shell whose stdout and stderr are the task's output file
+# <tmp>/claude-<uid>/<project>/<session_id>/tasks/<id>.output; a subagent has the same file (a link), with no shell.
+TASK_OUTPUT = re.compile(r'/tasks/([^/]+)\.output$')
+
+
+def task_shells(claude, procs):
+    """Bash-tool shells of this claude that run a background task → {task id: (shell PID, output file)}, by the shell's
+    stdout link (Linux /proc; elsewhere none)."""
+    found = {}
+    for pid, (ppid, argv) in procs.items():
+        if ppid != claude or BASH_TOOL_SHELL not in ' '.join(argv):
+            continue
+        try:
+            out = os.readlink(f'/proc/{pid}/fd/1')
+        except OSError:
+            continue
+        match = TASK_OUTPUT.search(out)
+        if match:
+            found[match.group(1)] = (pid, out)
+    return found
+
+
+def fold(tasks, shells, rest, procs):
+    """Pure: the Stop input's background tasks, their shells {id: shell PID} and the leftovers [(pid, age, command)] →
+    ([(task, N)], leftovers under no listed task's shell): what runs under a task's shell is that task's, counted as N;
+    the rest are the session's orphans."""
+    under = {t.get('id'): shells[t.get('id')] for t in tasks if t.get('id') in shells}
+    counts, orphaned = dict.fromkeys(under, 0), []
+    for item in rest:
+        owner = next((i for i, shell in under.items() if descends(item[0], shell, procs)), None)
+        if owner is None:
+            orphaned.append(item)
+        else:
+            counts[owner] += 1
+    return [(t, counts.get(t.get('id'), 0)) for t in tasks], orphaned
+
+
+def born(path):
+    """Birth time of a file itself (a link is not followed), epoch seconds; unknown (no file, no birth time in the file
+    system) → None. Linux: stat %W (statx; Python has no statx before 3.15); macOS: st_birthtime."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if hasattr(st, 'st_birthtime'):
+        return st.st_birthtime
+    out = subprocess.run(['stat', '-c', '%W', path], capture_output = True, text = True).stdout.strip()
+    return int(out) if out.isdigit() and int(out) > 0 else None
+
+
+def task_output(session_id, task_id):
+    """The output file of a background task of this session, by the harness's layout under its temp root (TMPDIR, else
+    /tmp); none → None."""
+    root = os.path.join(os.environ.get('TMPDIR') or '/tmp', f'claude-{os.getuid()}')
+    pattern = os.path.join(glob.escape(root), '*', glob.escape(session_id), 'tasks', glob.escape(task_id) + '.output')
+    return next(iter(glob.glob(pattern)), None)
+
+
+def task_since(task_id, session_id, shell):
+    """When a background task started: the birth of its output file (the shell's stdout link, else found by the session),
+    else its shell's start; none known → None. The Stop input's task item has no time field."""
+    shell_pid, out = shell
+    if not out and session_id and task_id:
+        out = task_output(session_id, task_id)
+    return (born(out) if out else None) or (started(shell_pid) if shell_pid else None)
+
+
+def background(tasks, session_id = None, claude = None, name = None, procs = None):
+    """What a stop of this claude leaves running → wake lines: per background task of the Stop input
+    "<id> · <type> · <description> · <age> (+N processes)" (no start known → no age field; N = 0 → no suffix), then every
+    other leftover of the session as "orphan <pid> · <age> · <command>". No claude: the tasks alone, no process scan."""
+    shells, rest = {}, []
+    if claude is not None:
+        procs = processes() if procs is None else procs
+        shells, rest = task_shells(claude, procs), leftovers(claude, name, procs)
+    folded, orphaned = fold(tasks, {i: pid for i, (pid, _) in shells.items()}, rest, procs)
+    now, lines = time.time(), []
+    for task, count in folded:
+        since = task_since(task.get('id'), session_id, shells.get(task.get('id'), (None, None)))
+        fields = [str(task.get(k)) for k in ('id', 'type', 'description')] + ([elapsed(now - since)] if since else [])
+        lines.append(SEP.join(fields) + (f' (+{count} processes)' if count else ''))
+    return lines + [f'orphan {pid}{SEP}{elapsed(age)}{SEP}{cmd}' for pid, age, cmd in orphaned]
 
 
 def elapsed(seconds):

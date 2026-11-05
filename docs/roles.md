@@ -90,8 +90,9 @@ The values:
 
 - `open`, `working`, `running a command`, `asking`, `waiting for permission`, `waiting for its background`, `telling the observer`,
   `stopped`, `stopped with background`, `broke`.
-- `stopped with background`: the turn ended while its background tasks or leftover processes run (listed in the text);
-  it wakes the observer like `stopped`. `waiting for its background` is left only for a builder that got its permission.
+- `stopped with background`: the turn ended while its background tasks or leftover processes run (listed in the text,
+  see "Leftover guard"); it does not wake the observer at once, only once it is stale (see "The waiter").
+  `waiting for its background` is left only for a builder that got its permission.
 - `asking` covers both the choice window and the MCP-server window (elicitation).
 - `running a command` holds as long as at least one foreground command runs, even if another tool finished in parallel
   next to it.
@@ -112,6 +113,8 @@ an executor:
 
 - asks, writes to it (`claude-role tell`), waits for permission, stopped, broke;
 - hung (`working` with no events for more than 120 s);
+- stayed `stopped with background` for more than 30 min (`STALE_BACKGROUND`), once per label: the waiter's poll reads
+  the label's own time, no timer of its own;
 - died: claude killed in the pane or gone together with the pane and session (a normal `/exit` does not wake).
 
 A repeat of the same state does not wake. There is always exactly one waiter. A twin session (`tmux new-session -t`) does
@@ -169,15 +172,19 @@ Screen reading is `tools/screen.py`, pinned to the UI strings of Claude Code 2.1
 
 ## Leftover guard
 
-On Stop of a role session, executor or observer (`hooks/role-state.py`, `roles.leftovers`): background tasks of the
-input and what its own model started that still lives (subtrees of its Bash-tool shells, reparented processes with its
-marks; MCP servers and hooks are not the model's) hold the stop with the list when it holds a task (by its `id`) or a
-process (by its pid) the last guarded stop of the session did not see; the same or a shrunk set passes, and so does the
-stop right after a hold. Every guarded stop remembers its set in `state/leftovers/<session_id>.json`; the normal
-SessionEnd removes it. Each task line carries its id (`<id> · <type> · <description>`, closed by `TaskStop <id>`).
-An auto-armed artifact monitor ("live updates for artifact ... (auto-armed on publish)") is a task like any other.
-An observer counts only its own tree. A failing scan lets the stop pass and logs to `state/logs/leftover-guard.log`;
-a failing guard lets it pass too.
+A Stop is never held: the hook gives no decision. On an executor's Stop (`hooks/role-state.py`, `roles.background`)
+what its turn leaves running becomes the text of `stopped with background`, one line each:
+
+- per background task of the Stop input: `<id> · <type> · <description> · <age> (+N processes)`. The age is the birth
+  time of the task's `tasks/<id>.output` under the harness temp root (a background Bash task's shell writes there, a
+  subagent has a link there), else its shell's start; the input item has no time field, so with neither there is no
+  age field. What runs under the task's Bash-tool shell (found by its stdout link to that file) is folded into N
+  (`roles.fold`), even a child that churns; N = 0 has no suffix.
+- then every other process its model started that still lives (`roles.leftovers`: subtrees of its Bash-tool shells,
+  reparented processes with its marks; MCP servers and hooks are not the model's) as `orphan <pid> · <age> · <command>`.
+
+An auto-armed artifact monitor is listed like any task, it never holds. An observer counts only its own tree. A failing
+scan logs to `state/logs/leftover-guard.log` and the tasks are listed without it.
 
 Every hook text into an observer session ends with `roles.OPERATOR_LANGUAGE` (`roles.for_role`); executor texts stay as they are.
 

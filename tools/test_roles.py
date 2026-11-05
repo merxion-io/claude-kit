@@ -49,6 +49,16 @@ class NewLabels(unittest.TestCase):
     def test_working_label_does_not_wake(self):
         self.assertEqual(scan(label(roles.WORKING)), [])
 
+    def test_a_stop_with_background_does_not_wake_until_it_is_stale_then_once(self):
+        stopped = label(roles.STOPPED_BACKGROUND, 'b1 · shell · npm run dev · 00:00:05')
+        at = time.mktime(time.strptime(STAMP, roles.TIME_FORMAT))
+        self.assertEqual(scan(stopped), [])
+        self.assertEqual(scan(stopped, now = at + waiter.STALE_BACKGROUND), [])
+        stale, = scan(stopped, now = at + waiter.STALE_BACKGROUND + 60)
+        self.assertEqual(stale[2], f'stale{roles.SEP}{stopped}')
+        self.assertIn(f'stopped with background for {round((waiter.STALE_BACKGROUND + 60) / 60)} min · {stopped}', stale[3])
+        self.assertEqual(scan(stopped, seen = stale[2], now = at + 2 * waiter.STALE_BACKGROUND), [], 'one wake per label')
+
 
 class Footer(unittest.TestCase):
     def pane(self, line):
