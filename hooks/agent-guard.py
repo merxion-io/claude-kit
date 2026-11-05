@@ -7,14 +7,20 @@
 # PostToolUse of the executor's main session (any tool) — an operation run longer than its Series gets a reminder.
 # Measured 2026-10-29: as advice in a skill the rules did not hold (14 of 16 builders without a map,
 # a rollout by one builder for 140 turns, containers by the main session for 170 turns).
-import json, os, re, shlex, subprocess, sys
+import glob, json, os, re, shlex, subprocess, sys
 
 if os.environ.get('CLAUDE_ROLE') not in ('observer', 'executor'):
     sys.exit(0)  # bare claude: silent, before any import
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'tools'))
+KIT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(KIT, 'tools'))
 import roles, routing
 
 FORBIDDEN_TYPES = ('general-purpose', 'claude', '')
+
+
+def kit_roles():
+    """The kit's subagent roles: the stems of its agents/*.md, so a new role file is named here with no edit."""
+    return sorted(os.path.basename(path)[:-3] for path in glob.glob(os.path.join(KIT, 'agents', '*.md')))
 
 
 def brief_files(prompt):
@@ -46,7 +52,7 @@ def agent_problem(inp, rows):
         return None  # a fork inherits the model and effort of the session
     if kind in FORBIDDEN_TYPES:
         return (f'subagent_type "{kind or "empty"}" forbidden: kit or project roles only '
-                '(builder, scout, code-reviewer, verifier, spec-reviewer, spec-auditor) — orchestration §2.')
+                f'({", ".join(kit_roles())}) — orchestration §2.')
     missing = [k for k in ('model', 'effort') if not inp.get(k)]
     if missing:
         return f'no {" and ".join(missing)}: model and effort in every call (orchestration §2, references/routing.md).'

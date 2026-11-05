@@ -30,6 +30,7 @@ Orchestrator operations (the rows with Series): more than Series turns of one in
 | wide search (Explore) | Explore | a read-only sweep of many files for a conclusion | sonnet | low | — | 30 | — | — | — |
 | implementation plan (Plan) | Plan | a plan of an implementation, critical files, trade-offs | opus | medium | — | 30 | — | — | — |
 | status line setup (statusline-setup) | statusline-setup | configure the status line setting | sonnet | low | — | 30 | — | — | — |
+| web research (researcher) | researcher | docs, products, vendors, prices: claims with URLs, screenshots into a named folder | sonnet | medium | 15 / 45 | 60 | — | — | — |
 | web page (web-fetch) | web-fetch | read a known URL and answer | sonnet | low | — | 30 | — | — | — |
 
 Main-session context: auto-compact window 400k (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, the operator's choice) — `~/.claude/docs/measurements/auto-compact-2026-10-29.md`.

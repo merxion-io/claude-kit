@@ -5,7 +5,7 @@
 # repository: elsewhere (a kit copied by install.sh, even under a home in git) that rule says nothing.
 import glob, json, os, re, shlex, subprocess
 
-import roles
+import roles, routing
 from write_guard import project_table_path
 
 KIT_PREFIX = re.compile(r'^(?:\$HOME|\$\{HOME\}|~)/\.claude(?=/)')
@@ -15,10 +15,21 @@ def skill_file(home, name):
     return os.path.join(home, 'skills', name, 'SKILL.md')
 
 
+def frontmatter(text):
+    """The frontmatter of an agent's file between its `---` lines, or None."""
+    head = re.match(r'---\n(.*?)\n---', text, re.S)
+    return head and head[1]
+
+
+def frontmatter_fields(text):
+    """The `key: value` lines of an agent's frontmatter; a key whose value is a block list maps to ''."""
+    return dict(re.findall(r'^(\w+):[ \t]*(.*?)[ \t]*$', frontmatter(text) or '', re.M))
+
+
 def frontmatter_skills(text):
     """The names under `skills:` of an agent's frontmatter, as a block list or inline."""
-    head = re.match(r'---\n(.*?)\n---', text, re.S)
-    field = head and re.search(r'^skills:[ \t]*(.*)((?:\n[ \t]*-[ \t]*.+)*)', head[1], re.M)
+    head = frontmatter(text)
+    field = head and re.search(r'^skills:[ \t]*(.*)((?:\n[ \t]*-[ \t]*.+)*)', head, re.M)
     if not field:
         return []
     names = field[1].strip(' []').split(',') + re.findall(r'-[ \t]*(.+)', field[2])
@@ -32,6 +43,35 @@ def agent_skills(root, cwd):
             names = frontmatter_skills(f.read())
         found += [(f'agents/{os.path.basename(path)} names skill {name}: not under skills/',
                    f'add skills/{name}/SKILL.md or drop the name') for name in names if not os.path.isfile(skill_file(root, name))]
+    return found
+
+
+AGENT_FIELDS = ('tools', 'model', 'effort', 'maxTurns')
+ROUTING_TABLE = os.path.relpath(routing.TABLE, os.path.dirname(os.path.dirname(os.path.realpath(routing.__file__))))
+
+
+def agent_heads(root, cwd):
+    """An agent's frontmatter is whole, and a role that a row of the routing table names runs with that row's model and
+    effort; rows of built-in types (no agents/ file) are not ours."""
+    try:
+        rows = {r['role']: r for r in routing.kinds(os.path.join(root, ROUTING_TABLE))}
+    except OSError:
+        rows = {}
+    found = []
+    for path in sorted(glob.glob(os.path.join(root, 'agents', '*.md'))):
+        stem, what = os.path.basename(path)[:-3], f'agents/{os.path.basename(path)}'
+        with open(path, encoding = 'utf-8') as f:
+            head = frontmatter_fields(f.read())
+        if head.get('name') != stem:
+            found.append((f'{what}: name {head.get("name") or "missing"}, not {stem}', f'set "name: {stem}" in its frontmatter'))
+        found += [(f'{what}: no {key} in its frontmatter', f'add "{key}: …" to its frontmatter')
+                  for key in AGENT_FIELDS if not head.get(key)]
+        if head.get('maxTurns') and not head['maxTurns'].isdigit():
+            found.append((f'{what}: maxTurns {head["maxTurns"]} is no integer', 'set "maxTurns: <number>"'))
+        row = rows.get(stem)
+        found += [(f'{what}: {key} {head[key]}, the routing row "{row["kind"]}" says {row[key]}',
+                   f'make them one in {what} or skills/orchestration/references/routing.md')
+                  for key in ('model', 'effort') if row and head.get(key) and head[key] != row[key]]
     return found
 
 
@@ -185,7 +225,7 @@ def settings_hooks(root):
            [(f'settings.json runs a kit hook settings.base.json does not hold there: {c}', f'remove it from {path}') for c in stale]
 
 
-TREE_CHECKS = (agent_skills, gate_skills, role_texts, observer_skills, hook_commands, hook_files)  # a new rule over the tree is one more function here
+TREE_CHECKS = (agent_skills, agent_heads, gate_skills, role_texts, observer_skills, hook_commands, hook_files)  # a new rule over the tree is one more function here
 
 
 def tree_findings(root, cwd):

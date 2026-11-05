@@ -28,7 +28,7 @@ observer decides alone and what it brings to the operator. The hook `hooks/role-
 context of a role session at every start, resume, /clear and compaction; nothing is left to load.
 
 **Subagents** — `agents/`: `builder` writes code from a brief, `code-reviewer` reviews and fixes only what is proven,
-`scout` finds the right places in code, `verifier` checks one finding. For projects with specs — `spec-reviewer`
+`scout` finds the right places in code, `verifier` checks one finding, `researcher` answers from the web with a URL for every claim. For projects with specs — `spec-reviewer`
 (looks for what refutes "done per spec") and `spec-auditor` (is the proposal implemented). `builder`, `code-reviewer`
 and `spec-reviewer` get `engineering` right away.
 

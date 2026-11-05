@@ -10,6 +10,7 @@ import roles
 
 LIVE = 'bash "$HOME/.claude/hooks/live.sh"'
 FOREIGN = 'python3 /opt/my/own-hook.py'
+HEAD = 'tools: Read\nmodel: opus\neffort: medium\nmaxTurns: 10\n'  # the fields every agent's frontmatter holds
 
 
 def hooks_of(*commands):
@@ -28,7 +29,7 @@ class Fixture(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.root, True)
         self.cwd = os.path.join(self.root, 'project')
         os.makedirs(self.cwd)
-        self.write('agents/a.md', '---\nname: a\nskills:\n  - known\nmodel: opus\n---\nbody\n')
+        self.write('agents/a.md', f'---\nname: a\nskills:\n  - known\n{HEAD}---\nbody\n')
         self.write('skills/known/SKILL.md', 'x\n')
         for name in roles.OBSERVER_SKILLS:
             self.write(f'skills/{name}/SKILL.md', 'x\n')
@@ -62,11 +63,48 @@ class Fixture(unittest.TestCase):
     def test_an_agent_names_a_missing_skill(self):
         for head in ('skills:\n  - known\n  - gone', 'skills: [known, gone]', 'skills: gone'):
             with self.subTest(head = head):
-                self.write('agents/a.md', f'---\nname: a\n{head}\nmodel: opus\n---\n')
+                self.write('agents/a.md', f'---\nname: a\n{head}\n{HEAD}---\n')
                 self.assertEqual(self.found(), ['agents/a.md names skill gone: not under skills/'])
 
     def test_skills_in_the_body_of_an_agent_are_no_names(self):
-        self.write('agents/a.md', '---\nname: a\n---\nskills: [gone]\n')
+        self.write('agents/a.md', f'---\nname: a\n{HEAD}---\nskills: [gone]\n')
+        self.assertEqual(self.found(), [])
+
+    def routing_table(self, *rows):
+        self.write(kit_check.ROUTING_TABLE, '| Kind | Role | Model | Effort |\n|---|---|---|---|\n' +
+                   ''.join(f'| {row} |\n' for row in rows))
+
+    def test_an_agent_head_misses_a_field(self):
+        for key in kit_check.AGENT_FIELDS:
+            with self.subTest(key = key):
+                head = ''.join(line + '\n' for line in HEAD.splitlines() if not line.startswith(key + ':'))
+                self.write('agents/a.md', f'---\nname: a\n{head}---\n')
+                self.assertEqual(self.found(), [f'agents/a.md: no {key} in its frontmatter'])
+
+    def test_an_agent_without_a_frontmatter_misses_everything(self):
+        self.write('agents/a.md', 'name: a\n')
+        self.assertEqual(self.found(), ['agents/a.md: name missing, not a'] +
+                         [f'agents/a.md: no {key} in its frontmatter' for key in kit_check.AGENT_FIELDS])
+
+    def test_an_agent_name_is_not_its_file(self):
+        self.write('agents/a.md', f'---\nname: b\n{HEAD}---\n')
+        self.assertEqual(self.found(), ['agents/a.md: name b, not a'])
+
+    def test_max_turns_is_an_integer(self):
+        self.write('agents/a.md', f'---\nname: a\n{HEAD.replace("maxTurns: 10", "maxTurns: many")}---\n')
+        self.assertEqual(self.found(), ['agents/a.md: maxTurns many is no integer'])
+
+    def test_a_role_runs_with_its_routing_row(self):
+        self.routing_table('engine logic | — | opus | medium', 'role a (a) | a | opus | medium')
+        self.assertEqual(self.found(), [])
+
+    def test_a_role_model_and_effort_differ_from_its_routing_row(self):
+        self.routing_table('role a (a) | a | sonnet | high')
+        self.assertEqual(self.found(), ['agents/a.md: model opus, the routing row "role a (a)" says sonnet',
+                                        'agents/a.md: effort medium, the routing row "role a (a)" says high'])
+
+    def test_a_built_in_type_in_the_routing_table_has_no_agent_file(self):
+        self.routing_table('wide search (Explore) | Explore | sonnet | low')
         self.assertEqual(self.found(), [])
 
     def gates(self, text):

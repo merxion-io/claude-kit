@@ -19,10 +19,11 @@ Read `CLAUDE.md`/`AGENTS.md`/`README` (behaviour truth, style, git/test rules, d
 | `builder` | opus; mechanics — sonnet | medium |
 | `code-reviewer` | opus; mechanical milestone — sonnet + one opus gate round after `ready` | high |
 | `verifier` | sonnet | medium |
+| `researcher` | sonnet | medium |
 | `spec-reviewer` / `spec-auditor` | opus high / sonnet medium | — |
 
 - Error costs more than a turn → expensive model, else cheap; effort is a lever equal to model; re-asked/redone > 1 in 3 → wrong choice, a Sonnet row back to Opus.
-- Only these roles (or project's): `general-purpose`, `claude`, empty `subagent_type` forbidden; `model`, `effort` in every call. Code → `builder`, search → `scout`, check → `code-reviewer`/`verifier`; none fits → `builder` with brief.
+- Only these roles (or project's): `general-purpose`, `claude`, empty `subagent_type` forbidden; `model`, `effort` in every call. Code → `builder`, search → `scout`, web research → `researcher`, check → `code-reviewer`/`verifier`; none fits → `builder` with brief.
 
 ## 3. The loop
 1. **Scout:** don't search code yourself; no builder brief without map; one map per milestone (file), path in every brief; new zone extends it, not builder search.

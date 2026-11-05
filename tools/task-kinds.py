@@ -35,7 +35,7 @@ PROMPT_NOISE = ('map/scouting', 'review round', 'ticks, report, board card', 'pr
 OTHER = 'other'
 
 # The role decides itself where it is unambiguous; otherwise description first, then the start of prompt
-ROLE_KIND = {'scout': 'map/scouting', 'code-reviewer': 'review round', 'verifier': 'review round', 'spec-reviewer': 'review round', 'spec-auditor': 'review round'}
+ROLE_KIND = {'scout': 'map/scouting', 'researcher': 'researcher', 'code-reviewer': 'review round', 'verifier': 'review round', 'spec-reviewer': 'review round', 'spec-auditor': 'review round'}
 
 def kind_of(role, desc, prompt):
     if role in ROLE_KIND: return ROLE_KIND[role]
