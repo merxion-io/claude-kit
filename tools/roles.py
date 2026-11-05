@@ -399,14 +399,15 @@ def orphans(claude, name, born, procs):
 
 def leftovers(claude, name, procs = None):
     """What the model of this claude started that still lives → [(pid, age s, command)]: the subtrees of its Bash-tool
-    shells (not the shells) and its orphans, user-wide daemons and their subtrees aside."""
+    shells (not the shells) and its orphans, user-wide daemons and their subtrees aside; a container monitor's subtree
+    as the monitor once."""
     procs = processes() if procs is None else procs
     born, now = started(claude) or 0, time.time()
     shells = {p for p, (ppid, argv) in procs.items() if ppid == claude and BASH_TOOL_SHELL in ' '.join(argv)}
     mine = {p for p in procs if p not in shells and any(descends(p, s, procs) for s in shells)}
     mine |= set(orphans(claude, name, born, procs))
-    return [(p, round(now - (started(p) or now)), command(p, procs)) for p in sorted(mine)
-            if not user_wide(p, claude, procs)]
+    mine = {container_monitor(p, claude, procs) or p for p in mine if not user_wide(p, claude, procs)}
+    return [(p, round(now - (started(p) or now)), command(p, procs)) for p in sorted(mine)]
 
 
 def elapsed(seconds):

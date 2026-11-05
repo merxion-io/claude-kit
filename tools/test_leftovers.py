@@ -147,20 +147,22 @@ class StopGuard(Case):
         self.assertNotIn(f'{daemon} · ', block['reason'])
         self.assertNotIn(f'{child} · ', block['reason'])
 
-    def test_a_container_monitor_it_started_is_listed_as_its_container(self):
+    def test_a_container_monitor_it_started_and_its_subtree_are_listed_once_as_its_container(self):
         under = os.path.join(self.home, 'under-monitor.sh')
         with open(under, 'w') as f:
             f.write('sleep 7315 & wait\n')
-        executor = Dummy(self, 'executor', 'e', [f'exec -a conmon bash {under} -c cid7315', 'sleep 7316'])
-        deadline, monitor = time.time() + 5, []
-        while time.time() < deadline and not monitor:  # the subshell execs it a moment after it is up
+        executor = Dummy(self, 'executor', 'e', [f'exec -a conmon bash {under} -c cid7315 -n box7315', 'sleep 7316'])
+        deadline, found = time.time() + 5, []
+        while time.time() < deadline and not found:  # the subshell execs it, then it starts its child
             procs = roles.processes()
-            monitor = [k for k in executor.kids if procs.get(k, (0, ['']))[1][:1] == ['conmon']]
-        monitor, = monitor
+            found = [(k, p) for k in executor.kids if procs.get(k, (0, ['']))[1][:1] == ['conmon']
+                     for p, (ppid, argv) in procs.items() if ppid == k and argv == ['sleep', '7315']]
+        (monitor, child), = found
         block, out = executor.stop()
         self.assertIsNotNone(block, out)
         self.assertIn(f'{monitor} · ', block['reason'])
-        self.assertIn(f'container cid7315 (conmon {monitor})', block['reason'])
+        self.assertEqual(block['reason'].count(f'container box7315 (conmon {monitor})'), 1, block['reason'])
+        self.assertNotIn(f'{child} · ', block['reason'])
         self.assertIn('sleep 7316', block['reason'])
 
     def test_stop_hook_active_passes_and_the_executor_wakes_with_the_list(self):
