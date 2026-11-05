@@ -27,7 +27,7 @@ First find: truth about behaviour (spec, README), style/helpers (`CLAUDE.md`, `A
 - **Fix the cause:** reproduce → find → fix; a stub, fallback or `try/except` hiding a failure is no fix.
 - **Test behaviour** as the user calls it, no private symbols; drop a test passing if functions return nothing.
 - **Failing test before the edit** when an honest one is possible: see it fail for the expected reason.
-- **Sabotage is mandatory:** break code → exactly YOUR tests go red → file restored (`~/.claude/tools/quality/sabotage.py`). Blind guard: fixture shorter than the subject, or the compared value never changes.
+- **Sabotage is mandatory, once per milestone before the merge or build:** break code → exactly YOUR tests go red → file restored (`~/.claude/tools/quality/sabotage.py`); per subtask the failing test before the edit is enough. Blind guard: fixture shorter than the subject, or the compared value never changes.
 - **Refactoring:** pin behaviour by test → change structure → behaviour unmoved.
 - **Ratchets** (`references/gates.md`: duplicates, dead code, complexity/CRAP): new finding red, debt thins. Complexity threshold 10; with coverage
   CRAP = c²·(1−cov)³ + c.
