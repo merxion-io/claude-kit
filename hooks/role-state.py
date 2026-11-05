@@ -5,8 +5,10 @@
 # background_tasks in the Stop input (checked: builder, background command, Monitor — as shell, Workflow). An MCP server
 # window (elicitation) is "asking", the answer to it is "working". Permission grant and denial, any interruption
 # (Esc) are invisible to hooks — no events: the label is written by whoever pressed.
-# For both roles on Stop — the leftover guard (leftover_block): a turn leaving background or processes is held once; a
-# stop that passes is "stopped" or "stopped with background" with the list, and both wake the observer.
+# For both roles on Stop — the leftover guard (leftover_block): a stop leaving a background task (by id) or a process
+# (by pid) the last guarded stop of the session did not see is held; the same or a shrunk set passes (the set is kept
+# under state/leftovers/ until the normal SessionEnd); a stop that passes is "stopped" or "stopped with background"
+# with the list, and both wake the observer.
 # For both roles on SessionStart — pane labels (role, name, observer, flags — passed by the launcher in the environment),
 # the revive list (state/roles.json: conversation id, folder, flags, project) and the session into the pult project, if it is not there yet;
 # on the normal SessionEnd — "closed"; remote control turned on mid-run goes into the flags. An executor that needs an observer (a state that wakes) while there is none
@@ -99,26 +101,50 @@ GUARD_LOG = os.path.join(roles.STATE_DIR, 'logs', 'leftover-guard.log')
 
 
 def still_running(ev):
-    """Stop of a role session → what its turn leaves running: background tasks of the input, then the processes its
-    model started (roles.leftovers). The process scan fails open: its trace goes to GUARD_LOG, the stop is not trapped."""
-    still = [f'{t.get("type")} · {t.get("description")}' for t in ev.get('background_tasks') or []]
+    """Stop of a role session → what its turn leaves running, {identity: line}: background tasks of the input by their
+    id, then the processes its model started (roles.leftovers) by pid. The process scan fails open: its trace goes to
+    GUARD_LOG, the stop is not trapped."""
+    still = {f'task {t.get("id")}': f'{t.get("id")} · {t.get("type")} · {t.get("description")}'
+             for t in ev.get('background_tasks') or []}
     try:
-        still += [f'{pid} · {roles.elapsed(age)} · {cmd}'
-                  for pid, age, cmd in roles.leftovers(int(roles.role_pid()), os.environ['CLAUDE_ROLE_NAME'])]
+        still.update((f'pid {pid}', f'{pid} · {roles.elapsed(age)} · {cmd}')
+                     for pid, age, cmd in roles.leftovers(int(roles.role_pid()), os.environ['CLAUDE_ROLE_NAME']))
     except Exception:
         with contextlib.suppress(OSError):
             os.makedirs(os.path.dirname(GUARD_LOG), exist_ok = True)
             with open(GUARD_LOG, 'a') as f:
                 f.write(f'{time.strftime(roles.TIME_FORMAT)} pid {os.getpid()}\n{traceback.format_exc()}\n')
-    return [roles.short(line) for line in still]
+    return {who: roles.short(line) for who, line in still.items()}
+
+
+def seen_path(ev):
+    """The leftover set the guard last saw in this session: a file by the Stop input's session_id."""
+    return os.path.join(roles.STATE_DIR, 'leftovers', re.sub(r'[^\w-]', '_', ev['session_id']) + '.json')
 
 
 def leftover_block(ev, still, role):
-    """The Stop guard: a turn that leaves something running is stopped once; the next stop (stop_hook_active) passes."""
-    if not still or ev.get('stop_hook_active'):
+    """The Stop guard: a stop is held iff what it leaves running holds an identity the last guarded stop of this session
+    did not see; every guarded stop remembers its set. The stop right after a hold (stop_hook_active) passes."""
+    path, tmp = seen_path(ev), f'{seen_path(ev)}.{os.getpid()}.tmp'
+    try:
+        with open(path) as f:
+            seen = set(json.load(f))
+    except FileNotFoundError:
+        seen = set()
+    os.makedirs(os.path.dirname(path), exist_ok = True)
+    with open(tmp, 'w') as f:
+        json.dump(sorted(still), f)
+    os.replace(tmp, path)
+    if ev.get('stop_hook_active') or not still.keys() - seen:
         return None
-    return {'decision': 'block', 'reason': roles.for_role(role, 'Leftovers still running:\n' + '\n'.join(still) +
-                                                         '\nClose them, or say why each must outlive you.')}
+    return {'decision': 'block', 'reason': roles.for_role(role, 'Leftovers still running:\n' + '\n'.join(still.values()) +
+                                                         '\nClose them (a background task: TaskStop <id>), or say why each must outlive you.')}
+
+
+def forget_leftovers(ev):
+    """The normal SessionEnd: the session's leftover set goes with it."""
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(seen_path(ev))
 
 
 def guarded(hold, ev, *args):
@@ -147,8 +173,9 @@ def main():
         print(json.dumps({'hookSpecificOutput': said}))  # ASCII: a file name not in UTF-8 cannot break the output
         if said.get('permissionDecision') == 'deny':
             return  # the call does not run: the label stays as it was
-    still = still_running(ev) if event == 'Stop' and not ev.get('agent_id') else ()
-    block = leftover_block(ev, still, role)
+    guards = event == 'Stop' and not ev.get('agent_id')
+    still = still_running(ev) if guards else {}
+    block = guarded(leftover_block, ev, still, role) if guards else None
     if block:
         print(json.dumps(block))  # the turn goes on: no label, no wake
         return
@@ -167,7 +194,7 @@ def main():
             if running != before:
                 roles.set_pane_option(pane, IN_FLIGHT, ' '.join(sorted(running)))
             label = roles.pane_option(pane, roles.STATE)
-            new = state_for(ev, roles.parse_state(label)[0], running, still)
+            new = state_for(ev, roles.parse_state(label)[0], running, list(still.values()))
             if new and new is not CLEAR and new[0] not in roles.WAKES and roles.parse_state(label)[0] == roles.TELLING \
                     and roles.pane_option(pane, roles.SEEN) != label:
                 new = None  # "telling the observer" stays until the waiter has seen it: the next tool call must not hide it
@@ -189,6 +216,7 @@ def main():
                                                    'transcript': ev.get('transcript_path'), 'since': int(time.time()),
                                                    'closed': False})
     elif event == 'SessionEnd':
+        forget_leftovers(ev)
         roles.update_roster(observer, role, name, {'closed': True})
     roles.sync_remote_control(pane, observer, role, name)
     if role == 'observer':

@@ -171,8 +171,13 @@ Screen reading is `tools/screen.py`, pinned to the UI strings of Claude Code 2.1
 
 On Stop of a role session, executor or observer (`hooks/role-state.py`, `roles.leftovers`): background tasks of the
 input and what its own model started that still lives (subtrees of its Bash-tool shells, reparented processes with its
-marks; MCP servers and hooks are not the model's) hold the stop once with the list; the stop after it passes. An
-observer counts only its own tree. A failing scan lets the stop pass and logs to `state/logs/leftover-guard.log`.
+marks; MCP servers and hooks are not the model's) hold the stop with the list when it holds a task (by its `id`) or a
+process (by its pid) the last guarded stop of the session did not see; the same or a shrunk set passes, and so does the
+stop right after a hold. Every guarded stop remembers its set in `state/leftovers/<session_id>.json`; the normal
+SessionEnd removes it. Each task line carries its id (`<id> · <type> · <description>`, closed by `TaskStop <id>`).
+An auto-armed artifact monitor ("live updates for artifact ... (auto-armed on publish)") is a task like any other.
+An observer counts only its own tree. A failing scan lets the stop pass and logs to `state/logs/leftover-guard.log`;
+a failing guard lets it pass too.
 
 Every hook text into an observer session ends with `roles.OPERATOR_LANGUAGE` (`roles.for_role`); executor texts stay as they are.
 

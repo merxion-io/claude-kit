@@ -118,7 +118,7 @@ class StopGuard(Case):
         self.assertIn(f'{executor.kids[0]} · ', block['reason'])
         self.assertIn('sleep 7301', block['reason'])
         self.assertTrue(block['reason'].startswith('Leftovers still running:\n'), block)
-        self.assertTrue(block['reason'].endswith('\nClose them, or say why each must outlive you.'), 'an executor text has no language line')
+        self.assertTrue(block['reason'].endswith('\nClose them (a background task: TaskStop <id>), or say why each must outlive you.'), 'an executor text has no language line')
         self.assertEqual(self.labels(), [], 'a held stop writes no label and wakes no one')
         os.kill(executor.kids[0], signal.SIGKILL)
         time.sleep(0.2)
@@ -188,17 +188,51 @@ class StopGuard(Case):
 
     def test_stop_hook_active_passes_and_the_executor_wakes_with_the_list(self):
         executor = Dummy(self, 'executor', 'e', ['sleep 7303'])
-        block, out = executor.stop(stop_hook_active = True, background_tasks = [{'type': 'subagent', 'description': 'Build X'}])
+        block, out = executor.stop(stop_hook_active = True, background_tasks = [{'id': 'b1', 'type': 'subagent', 'description': 'Build X'}])
         self.assertIsNone(block, out)
         label = self.labels()[-1]
         self.assertTrue(label.startswith(roles.STOPPED_BACKGROUND + roles.SEP), label)
-        self.assertIn('subagent · Build X', label)
+        self.assertIn('b1 · subagent · Build X', label)
         self.assertIn(f'{executor.kids[0]} · ', label)
 
     def test_background_tasks_alone_hold_the_stop(self):
         executor = Dummy(self, 'executor', 'e')
-        block, out = executor.stop(background_tasks = [{'type': 'shell', 'description': 'npm run dev'}])
-        self.assertIn('shell · npm run dev', (block or {}).get('reason', ''), out)
+        block, out = executor.stop(background_tasks = [{'id': 'bash7', 'type': 'shell', 'description': 'npm run dev'}])
+        self.assertIn('\nbash7 · shell · npm run dev\n', (block or {}).get('reason', ''), out)
+        self.assertIn('TaskStop <id>', block['reason'])
+
+    def test_the_same_background_task_on_a_new_turn_passes_a_new_one_holds_again(self):
+        executor = Dummy(self, 'executor', 'e')
+        monitor = {'id': 'mon1', 'type': 'monitor', 'status': 'running',
+                   'description': 'live updates for artifact X (auto-armed on publish)'}
+        self.assertIsNotNone(executor.stop(background_tasks = [monitor])[0])
+        block, out = executor.stop(background_tasks = [monitor])  # each new turn sends stop_hook_active False
+        self.assertIsNone(block, out)
+        block, out = executor.stop(background_tasks = [monitor, {'id': 'bash8', 'type': 'shell', 'description': 'tail'}])
+        self.assertIsNotNone(block, out)
+        self.assertIn('mon1 · monitor · ', block['reason'])
+        self.assertIsNone(executor.stop(background_tasks = [])[0], 'a set that only shrank passes')
+
+    def test_the_same_process_on_a_new_turn_passes_a_new_one_holds_again(self):
+        executor = Dummy(self, 'executor', 'e', ['sleep 7317'])
+        self.assertIsNotNone(executor.stop()[0])
+        block, out = executor.stop()
+        self.assertIsNone(block, out)
+        self.assertIsNotNone(executor.stop(background_tasks = [{'id': 'bash9', 'type': 'shell', 'description': 'x'}])[0])
+        later = Dummy(self, 'executor', 'e', ['sleep 7318'])  # the same session id: a new pid holds again
+        block, out = later.stop(background_tasks = [{'id': 'bash9', 'type': 'shell', 'description': 'x'}])
+        self.assertIn(f'{later.kids[0]} · ', (block or {}).get('reason', ''), out)
+        self.assertIn('bash9 · shell · x', block['reason'], 'the list is all that still runs')
+
+    def test_a_closed_session_forgets_its_leftovers_a_killed_one_does_not(self):
+        executor = Dummy(self, 'executor', 'e', ['sleep 7319'])
+        self.assertIsNotNone(executor.stop()[0])
+        executor.stop(hook_event_name = 'SessionEnd', reason = roles.KILLED)
+        self.assertIsNone(executor.stop()[0])
+        executor.stop(hook_event_name = 'SessionEnd', reason = 'prompt_input_exit')
+        block, out = executor.stop()
+        self.assertIsNotNone(block, out)
+
 
     def test_an_observer_is_held_by_its_own_child_not_by_its_executors(self):
         observer = Dummy(self, 'observer', 'o')  # first: its executor's processes are younger, only their marks are not its
@@ -276,7 +310,7 @@ class StopWakes(Case):
 
     def test_a_stop_with_background_wakes_the_observer_and_names_it(self):
         executor = Dummy(self, 'executor', 'e')
-        executor.stop(stop_hook_active = True, background_tasks = [{'type': 'subagent', 'description': 'Build X'}])
+        executor.stop(stop_hook_active = True, background_tasks = [{'id': 'b1', 'type': 'subagent', 'description': 'Build X'}])
         found = self.wakes(self.labels()[-1])
         self.assertEqual(len(found), 1, self.labels())
         self.assertIn('subagent · Build X', found[0][3])
