@@ -164,16 +164,17 @@ def main():
         why = agent_problem(ev.get('tool_input') or {}, routing.kinds())
         if why:
             print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
-                                                     'permissionDecisionReason': why}}, ensure_ascii = False))
+                                                     'permissionDecisionReason': roles.for_role(role, why)}}, ensure_ascii = False))
     elif event == 'PreToolUse' and tool == 'Bash' and role == 'observer':
         why = typing_problem((ev.get('tool_input') or {}).get('command') or '')
         if why:
             print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
-                                                     'permissionDecisionReason': why}}, ensure_ascii = False))
+                                                     'permissionDecisionReason': roles.for_role(role, why)}}, ensure_ascii = False))
     elif event == 'PostToolUse' and role == 'executor' and not ev.get('agent_id'):
         note = run_nudge(tool or '', ev, routing.kinds())
         if note:
-            print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse', 'additionalContext': note}},
+            print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PostToolUse',
+                                                     'additionalContext': roles.for_role(role, note)}},
                              ensure_ascii = False))
 
 

@@ -34,16 +34,19 @@ RUNNING = 'running a command'
 ASKING = 'asking'
 PERMISSION = 'waiting for permission'
 BACKGROUND = 'waiting for its background'
+STOPPED_BACKGROUND = 'stopped with background'  # the turn ended while its background (tasks, processes) still runs
 TELLING = 'telling the observer'  # claude-role tell: a fact or a question without a choice — an action, not prose in an answer
 STOPPED = 'stopped'
 BROKEN = 'broke'
 OPENED = 'open'  # session is open and waits for input — does not wake and is not "hung"
-WAKES = (ASKING, PERMISSION, STOPPED, BROKEN, TELLING)  # states for which the waiter wakes the observer
+WAKES = (ASKING, PERMISSION, STOPPED, STOPPED_BACKGROUND, BROKEN, TELLING)  # states for which the waiter wakes the observer
 SEEN = '@claude_seen'  # on the executor pane: the state label the waiter already woke the observer on
 STATE = '@claude_state'
 KILLED = 'other'  # reason in SessionEnd when claude is killed (kill-session, signal); /exit, Ctrl+C — prompt_input_exit
 ROLE_NAMES = {'observer': 'observer', 'executor': 'executor'}
 OBSERVER_SKILLS = ('orchestration', 'checkpoint')  # what the observer's main session may load; hooks/role-state.py denies the rest
+# The model answers in the language of the last text it read: every hook text into an observer session ends with this
+OPERATOR_LANGUAGE = 'Reply to the operator in the operator\'s language ("Talking to me").'
 CONTEXT_LIMIT = 10000  # chars of one hook's additionalContext (claude 2.1.316): over it arrive a 2KB preview and a file path
 ROLE_PID = 'CLAUDE_ROLE_PID'  # PID of the claude started by claude-role: the launcher does exec, the PID is the same
 ROLE_OBSERVER = 'CLAUDE_ROLE_OBSERVER'  # next — what the launcher passes to SessionStart: the executor's observer,
@@ -241,6 +244,12 @@ def role_session():
     return role if str(own_claude()) == mark else None
 
 
+def for_role(role, text):
+    """A hook text for a session of this role: the observer's ends with OPERATOR_LANGUAGE, the executor's stays as is.
+    The role intro needs none: roles/observer.md says it."""
+    return f'{text}\n{OPERATOR_LANGUAGE}' if role == 'observer' else text
+
+
 def role_file(root, role):
     return os.path.join(root, 'roles', f'{role}.md')
 
@@ -303,6 +312,77 @@ def _live_before_pid_label(pane, role, procs):
         if f'CLAUDE_ROLE={role}'.encode() in env and (mark is None or mark == str(pid).encode()):
             return True
     return False
+
+
+# Leftovers: what the model of a claude started that still lives. Rule chosen on a real tree: claude's direct children
+# are MCP servers, hooks and Bash-tool shells; only Bash-tool shells (argv sources shell-snapshots/snapshot-) are the model's.
+BASH_TOOL_SHELL = '/shell-snapshots/snapshot-'
+
+
+def started(pid):
+    """When a process started, epoch seconds; gone → None. Linux: /proc stat and boot time; elsewhere: ps lstart."""
+    try:
+        if sys.platform.startswith('linux'):
+            with open(f'/proc/{pid}/stat') as f:
+                ticks = int(f.read().rsplit(')', 1)[1].split()[19])
+            with open('/proc/stat') as f:
+                boot = int(next(line.split()[1] for line in f if line.startswith('btime ')))
+            return boot + ticks / os.sysconf('SC_CLK_TCK')
+        out = subprocess.run(['ps', '-o', 'lstart=', '-p', str(pid)], capture_output = True, text = True).stdout.strip()
+        return time.mktime(time.strptime(out, '%a %b %d %H:%M:%S %Y')) if out else None
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def role_mark(pid):
+    """The marks a process inherited from the claude-role session it came from: (CLAUDE_ROLE_PID, CLAUDE_ROLE_NAME);
+    unreadable (gone, another user, no /proc) → None. They survive a reparent (setsid, nohup, a daemon)."""
+    try:
+        with open(f'/proc/{pid}/environ', 'rb') as f:
+            env = dict(kv.split(b'=', 1) for kv in f.read().split(b'\0') if b'=' in kv)
+    except OSError:
+        return None
+    mark = env.get(ROLE_PID.encode())
+    return None if mark is None else (mark.decode(errors = 'replace'),
+                                      env.get(b'CLAUDE_ROLE_NAME', b'').decode(errors = 'replace'))
+
+
+def holders(procs):
+    """Ancestors of every claude (pane shells, tmux servers): they host sessions, a session never owns them."""
+    held = set()
+    for pid, (ppid, argv) in procs.items():
+        if is_claude(argv):
+            while ppid > 1 and ppid in procs and ppid not in held:
+                held.add(ppid)
+                ppid = procs[ppid][0]
+    return held
+
+
+def orphans(claude, name, born, procs):
+    """Processes out of the tree of this claude that carry its marks and started after it (no reused PID): Linux only."""
+    if not sys.platform.startswith('linux'):
+        return []
+    held, me = holders(procs), os.getpid()
+    return [p for p in procs if p != me and p != claude and p not in held and not descends(p, claude, procs)
+            and role_mark(p) == (str(claude), name) and (started(p) or 0) >= born]
+
+
+def leftovers(claude, name, procs = None):
+    """What the model of this claude started that still lives → [(pid, age s, command)]: the subtrees of its Bash-tool
+    shells (not the shells) and its orphans."""
+    procs = processes() if procs is None else procs
+    born, now = started(claude) or 0, time.time()
+    shells = {p for p, (ppid, argv) in procs.items() if ppid == claude and BASH_TOOL_SHELL in ' '.join(argv)}
+    mine = {p for p in procs if p not in shells and any(descends(p, s, procs) for s in shells)}
+    mine |= set(orphans(claude, name, born, procs))
+    mine.discard(os.getpid())
+    return [(p, round(now - (started(p) or now)), ' '.join(procs[p][1])) for p in sorted(mine)]
+
+
+def elapsed(seconds):
+    """Seconds → [d-]hh:mm:ss, as ps etime."""
+    days, rest = divmod(int(seconds), 86400)
+    return (f'{days}-' if days else '') + time.strftime('%H:%M:%S', time.gmtime(rest))
 
 
 def state_lock(pane):

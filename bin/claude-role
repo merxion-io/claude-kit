@@ -431,7 +431,9 @@ def typed(name, pane, text):
 # close: the normal end of an executor: nothing it still works on or asks about is cut, and the waiter never sees a death.
 CLOSE_WAIT = 20  # s — how long /exit has to end claude
 FORCE_WAIT = 10  # s — how long each signal has
-CLOSE_BLOCKS = (roles.WORKING, roles.RUNNING, roles.BACKGROUND, roles.ASKING, roles.PERMISSION, roles.TELLING)
+CLOSE_BLOCKS = (roles.WORKING, roles.RUNNING, roles.BACKGROUND, roles.STOPPED_BACKGROUND, roles.ASKING, roles.PERMISSION,
+                roles.TELLING)
+LEFTOVER_WAIT = 3  # s — how long SIGTERM has before SIGKILL for what the executor left running
 
 
 def close_refusal(pane, session, screen, force):
@@ -499,6 +501,51 @@ def exit_forced(me, name, pane):
             return
     roles.update_roster(me, 'executor', name, {'closed': False})
     raise Refusal(f'"{name}": PID {pid} outlived SIGKILL; state label removed, the rest stays')
+
+
+def tree_of(pane):
+    """The executor's claude and its tree with start times, taken before /exit: after it the children are reparented.
+    → (PID or None, its start, {pid: start}); no live claude: tree None, its start unknown."""
+    pid = pane[roles.PID_LABEL]
+    procs = processes()
+    if not (pid.isdigit() and live(pane, 'executor', procs)):
+        return (int(pid) if pid.isdigit() else None), None, None
+    claude = int(pid)
+    return claude, roles.started(claude), {p: roles.started(p) for p in procs if p != claude and roles.descends(p, claude, procs)}
+
+
+def end_leftovers(name, claude, born, tree):
+    """Claude is gone: what it left running ends — its tree taken before the exit and the orphans carrying its marks
+    (roles.orphans), each only while it is the same process (start time); SIGTERM, LEFTOVER_WAIT, SIGKILL. No pattern,
+    nothing else. Its PID is a live process again with no start known: no orphan is its. → ["<pid> <command>"]."""
+    procs = processes()
+    if claude is not None and (born is not None or claude not in procs):
+        tree = {**(tree or {}), **{p: roles.started(p) for p in roles.orphans(claude, name, born or 0, procs)}}
+    mine = {p: t for p, t in (tree or {}).items() if t is not None and roles.started(p) == t}
+    said = [f'{p} {" ".join(procs.get(p, (0, []))[1])}'.strip() for p in sorted(mine)]
+    for sign in (signal.SIGTERM, signal.SIGKILL):
+        for p in mine:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(p, sign)
+        deadline = time.time() + LEFTOVER_WAIT
+        while mine and time.time() < deadline:
+            mine = {p: t for p, t in mine.items() if roles.started(p) == t}
+            time.sleep(0.1)
+        mine = {p: t for p, t in mine.items() if roles.started(p) == t}
+        if not mine:
+            break
+    return said
+
+
+def labelled_containers(name):
+    """Containers labelled claude_executor=<name>, by podman and docker, whichever exist: reported, never removed."""
+    found = []
+    for tool in ('podman', 'docker'):
+        if shutil.which(tool):
+            out = subprocess.run([tool, 'ps', '-a', '--filter', f'label=claude_executor={name}', '--format', '{{.Names}}'],
+                                 capture_output = True, text = True)
+            found += [f'{tool} {c}' for c in out.stdout.split()] if out.returncode == 0 else []
+    return found
 
 
 def forgotten_in_pult(session):
@@ -572,11 +619,18 @@ def close(argv):
     if not pane:
         return close_without_pane(me, name)
     pane_id = pane['pane_id']
-    if live(pane, 'executor', processes()):
+    claude, born, tree = tree_of(pane)
+    if tree is not None:  # its claude is live
         why = close_refusal(pane, session_file(pane), Screen(pane_id), force)
         if why:
             raise Refusal(f'"{name}": not closed: {why}')
         exit_forced(me, name, pane) if force else exit_normally(name, pane_id)
+    ended_ones = end_leftovers(name, claude, born, tree)
+    if ended_ones:
+        print(f'"{name}": ended what it left running: ' + '; '.join(ended_ones))
+    containers = labelled_containers(name)
+    if containers:
+        print(f'"{name}": its labelled containers still run, not removed: ' + ', '.join(containers))
     done = clear_closed(me, name, pane_id, pane['session_name'])
     roles.drop_brief(me, name)
     print(f'"{name}": closed{" by force" if force else ""}, {done}{forgotten_in_pult(pane["session_name"])}')

@@ -5,6 +5,8 @@
 # background_tasks in the Stop input (checked: builder, background command, Monitor — as shell, Workflow). An MCP server
 # window (elicitation) is "asking", the answer to it is "working". Permission grant and denial, any interruption
 # (Esc) are invisible to hooks — no events: the label is written by whoever pressed.
+# For both roles on Stop — the leftover guard (leftover_block): a turn leaving background or processes is held once; a
+# stop that passes is "stopped" or "stopped with background" with the list, and both wake the observer.
 # For both roles on SessionStart — pane labels (role, name, observer, flags — passed by the launcher in the environment),
 # the revive list (state/roles.json: conversation id, folder, flags, project) and the session into the pult project, if it is not there yet;
 # on the normal SessionEnd — "closed"; remote control turned on mid-run goes into the flags. An executor that needs an observer (a state that wakes) while there is none
@@ -13,7 +15,7 @@ import contextlib, json, os, re, shlex, sys, time, traceback
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), 'tools'))
 import roles, skill_gates, write_guard
-from roles import ASKING, BACKGROUND, BROKEN, BUILDER, OPENED, PERMISSION, RUNNING, STOPPED, WORKING
+from roles import ASKING, BACKGROUND, BROKEN, BUILDER, OPENED, PERMISSION, RUNNING, STOPPED, STOPPED_BACKGROUND, WORKING
 
 CLEAR = object()
 IN_FLIGHT = '@claude_running'  # tool_use_id of foreground commands in flight
@@ -42,9 +44,9 @@ def foreground(ev, running):
     return running
 
 
-def state_for(ev, current, running = frozenset()):
-    """The hook input, the current state and the foreground commands in flight after it → (state, text), CLEAR or
-    None (no change)."""
+def state_for(ev, current, running = frozenset(), still = ()):
+    """The hook input, the current state, the foreground commands in flight after it and, on Stop, what the turn leaves
+    running (still_running) → (state, text), CLEAR or None (no change)."""
     event, tool, tool_input = ev['hook_event_name'], ev.get('tool_name'), ev.get('tool_input') or {}
     if ev.get('agent_id'):
         # Builder inside an executor: its tools are not the executor's turn, except permission — that goes to the operator
@@ -73,11 +75,8 @@ def state_for(ev, current, running = frozenset()):
         return WORKING, f'MCP «{ev.get("mcp_server_name")}»: {ev.get("action")}'
     if event in ('PostToolUse', 'PostToolUseFailure'):
         return None if running else (WORKING, tool)  # another command is still running nearby — the label is its
-    if event == 'Stop':
-        background = ev.get('background_tasks') or []
-        if background:
-            return BACKGROUND, '; '.join(f'{t.get("type")}: {t.get("description")}' for t in background)
-        return STOPPED, ev.get('last_assistant_message')
+    if event == 'Stop':  # a stop that passed the leftover guard: it wakes the observer, background or not
+        return (STOPPED_BACKGROUND, '; '.join(still)) if still else (STOPPED, ev.get('last_assistant_message'))
     if event == 'StopFailure':
         return BROKEN, f'{ev.get("error")}: {ev.get("last_assistant_message") or ev.get("error_details") or ""}'
     if event == 'SessionEnd':
@@ -92,7 +91,34 @@ def observer_skill(ev):
     if ev['tool_input']['skill'].removeprefix('/') in roles.OBSERVER_SKILLS:
         return None
     return {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
-            'permissionDecisionReason': 'this skill is not for the observer, give it to a subagent or an executor'}
+            'permissionDecisionReason': roles.for_role(
+                'observer', 'this skill is not for the observer, give it to a subagent or an executor')}
+
+
+GUARD_LOG = os.path.join(roles.STATE_DIR, 'logs', 'leftover-guard.log')
+
+
+def still_running(ev):
+    """Stop of a role session → what its turn leaves running: background tasks of the input, then the processes its
+    model started (roles.leftovers). The process scan fails open: its trace goes to GUARD_LOG, the stop is not trapped."""
+    still = [f'{t.get("type")} · {t.get("description")}' for t in ev.get('background_tasks') or []]
+    try:
+        still += [f'{pid} · {roles.elapsed(age)} · {cmd}'
+                  for pid, age, cmd in roles.leftovers(int(roles.role_pid()), os.environ['CLAUDE_ROLE_NAME'])]
+    except Exception:
+        with contextlib.suppress(OSError):
+            os.makedirs(os.path.dirname(GUARD_LOG), exist_ok = True)
+            with open(GUARD_LOG, 'a') as f:
+                f.write(f'{time.strftime(roles.TIME_FORMAT)} pid {os.getpid()}\n{traceback.format_exc()}\n')
+    return [roles.short(line) for line in still]
+
+
+def leftover_block(ev, still, role):
+    """The Stop guard: a turn that leaves something running is stopped once; the next stop (stop_hook_active) passes."""
+    if not still or ev.get('stop_hook_active'):
+        return None
+    return {'decision': 'block', 'reason': roles.for_role(role, 'Leftovers still running:\n' + '\n'.join(still) +
+                                                         '\nClose them, or say why each must outlive you.')}
 
 
 def guarded(hold, ev, *args):
@@ -121,6 +147,11 @@ def main():
         print(json.dumps({'hookSpecificOutput': said}))  # ASCII: a file name not in UTF-8 cannot break the output
         if said.get('permissionDecision') == 'deny':
             return  # the call does not run: the label stays as it was
+    still = still_running(ev) if event == 'Stop' and not ev.get('agent_id') else ()
+    block = leftover_block(ev, still, role)
+    if block:
+        print(json.dumps(block))  # the turn goes on: no label, no wake
+        return
     pid = roles.role_pid()
     if roles.pane_option(pane, roles.PID_LABEL) != pid:
         roles.set_pane_option(pane, roles.PID_LABEL, pid)  # it shows liveness without the environment of a foreign process
@@ -136,7 +167,7 @@ def main():
             if running != before:
                 roles.set_pane_option(pane, IN_FLIGHT, ' '.join(sorted(running)))
             label = roles.pane_option(pane, roles.STATE)
-            new = state_for(ev, roles.parse_state(label)[0], running)
+            new = state_for(ev, roles.parse_state(label)[0], running, still)
             if new and new is not CLEAR and new[0] not in roles.WAKES and roles.parse_state(label)[0] == roles.TELLING \
                     and roles.pane_option(pane, roles.SEEN) != label:
                 new = None  # "telling the observer" stays until the waiter has seen it: the next tool call must not hide it
@@ -192,7 +223,8 @@ def push_tool(ev):
         open(mark, 'w').close()
         return
     if event in ('UserPromptSubmit', 'PostToolUse') and not os.path.exists(mark):
-        print(json.dumps({'hookSpecificOutput': {'hookEventName': event, 'additionalContext': PUSH_REMINDER}}))
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': event,
+                                                 'additionalContext': roles.for_role('observer', PUSH_REMINDER)}}))
 
 
 def adopt_pult(session, project, name):

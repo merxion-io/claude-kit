@@ -89,7 +89,9 @@ The hook `hooks/role-state.py` (in `settings.base.json`) writes the executor the
 The values:
 
 - `open`, `working`, `running a command`, `asking`, `waiting for permission`, `waiting for its background`, `telling the observer`,
-  `stopped`, `broke`.
+  `stopped`, `stopped with background`, `broke`.
+- `stopped with background`: the turn ended while its background tasks or leftover processes run (listed in the text);
+  it wakes the observer like `stopped`. `waiting for its background` is left only for a builder that got its permission.
 - `asking` covers both the choice window and the MCP-server window (elicitation).
 - `running a command` holds as long as at least one foreground command runs, even if another tool finished in parallel
   next to it.
@@ -146,6 +148,9 @@ The observer may press in an executor's window only with `claude-role press "<ex
   goes, so the waiter reports no death. The tmux session is removed only if it holds just this pane; pult forgets it.
 - `--force`, for a hung one: SIGTERM, then SIGKILL, of the PID in the pane's label, only while that PID is its live claude.
 - With no pane left, close marks the entry closed. Revive skips closed entries.
+- After its claude is gone, on both paths, close ends what it left running and only that: its process tree taken before
+  `/exit` and the reparented processes carrying its `CLAUDE_ROLE_PID` and name (Linux), each checked by start time;
+  SIGTERM, then SIGKILL; the output lists them. Containers labelled `claude_executor=<name>` are reported, not removed.
 
 ## Guards on the observer
 
@@ -157,6 +162,15 @@ executor. The same hook guards the orchestration rules for role sessions (table 
 asking the operator; subagents, executors and sessions with no role are untouched. A failing check is open.
 
 Screen reading is `tools/screen.py`, pinned to the UI strings of Claude Code 2.1.312.
+
+## Leftover guard
+
+On Stop of a role session, executor or observer (`hooks/role-state.py`, `roles.leftovers`): background tasks of the
+input and what its own model started that still lives (subtrees of its Bash-tool shells, reparented processes with its
+marks; MCP servers and hooks are not the model's) hold the stop once with the list; the stop after it passes. An
+observer counts only its own tree. A failing scan lets the stop pass and logs to `state/logs/leftover-guard.log`.
+
+Every hook text into an observer session ends with `roles.OPERATOR_LANGUAGE` (`roles.for_role`); executor texts stay as they are.
 
 ## Write guard
 

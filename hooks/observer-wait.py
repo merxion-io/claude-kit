@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Observer waiter: Stop hook with asyncRewake. Waits until one of ITS executors (@claude_observer = the
 # observer name) needs attention, and wakes the observer: exit 2, who · state · gist — in stderr (a tell — its full text). Wakes on:
-# asks, waits for permission, stopped, broke, hung ("working" without events longer than HANG), died (the claude
+# asks, waits for permission, stopped (with background or not), broke, hung ("working" without events longer than HANG), died (the claude
 # of this role is not running while the state label stayed — the normal SessionEnd did not erase it; or an executor from the list that
 # has no pane — not closed normally, except those waiting for the revive after a reboot). Does not wake on: works, runs a
 # command, waits for its background. The check runs right at start: what happened while the observer was busy wakes it at once.
@@ -110,7 +110,7 @@ def main():
                 else:
                     roles.update_roster(me, 'executor', name, {'seen': key})
             roles.unset_pane_option(pane, WAITER)
-            sys.stderr.write('Executors need attention:\n' + '\n'.join(line for *_, line in found) + '\n')
+            sys.stderr.write(roles.for_role('observer', 'Executors need attention:\n' + '\n'.join(line for *_, line in found)) + '\n')
             return 2
         time.sleep(POLL)
     return 0

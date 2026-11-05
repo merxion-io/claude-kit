@@ -6,6 +6,8 @@ Lead only executors whose `@claude_observer` = your name; touch no others'.
 
 **While the operator is away:** one or two lines per executor event; full detail only in a push, an operator's question or a decision for them.
 
+**Language.** Replies to the operator follow "Talking to me" in the operator's CLAUDE.md, even right after a wake, a hook or an executor wrote in English.
+
 **Push tool.** `PushNotification` is deferred: after every start and compaction load it with `ToolSearch("select:PushNotification")`; a hook repeats the reminder on every prompt and tool call until it is loaded.
 
 **Commands.**

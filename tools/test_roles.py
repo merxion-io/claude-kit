@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Waiter scan, screen footer rule, close and revive of closed entries: python3 tools/test_roles.py. The real waiter scan (hooks/observer-wait.py attention)
 # reads the state labels; screen.dialog reads a captured pane.
-import importlib.machinery, importlib.util, io, itertools, json, os, re, shutil, signal, subprocess, sys, tempfile, time, types, unittest
+import contextlib, importlib.machinery, importlib.util, io, itertools, json, os, re, shutil, signal, subprocess, sys, tempfile, time, types, unittest
 from unittest import mock
 
 KIT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -90,7 +90,8 @@ class CloseRefusal(unittest.TestCase):
             self.assertNotIn('--force', why)
 
     def test_each_working_or_asking_state_refuses_without_force_only(self):
-        for kind in (roles.WORKING, roles.RUNNING, roles.BACKGROUND, roles.ASKING, roles.PERMISSION, roles.TELLING):
+        for kind in (roles.WORKING, roles.RUNNING, roles.BACKGROUND, roles.STOPPED_BACKGROUND, roles.ASKING, roles.PERMISSION,
+                     roles.TELLING):
             self.assertIn(kind, self.reason(label(kind)))
             self.assertIn('--force', self.reason(label(kind)))
             self.assertIsNone(self.reason(label(kind), force = True), kind)
@@ -170,6 +171,8 @@ def hook(event, **fields):
     subprocess.run([sys.executable, os.environ['LAB_HOOK']], capture_output = True, text = True, input = json.dumps(
         {'hook_event_name': event, 'session_id': f'c{os.getpid()}', 'cwd': os.getcwd(), **fields}))
 hook('SessionStart', source = 'startup')
+if os.environ.get('LAB_KIDS'):
+    subprocess.Popen(['bash', '-c', os.environ['LAB_KIDS']], stdin = subprocess.DEVNULL, stdout = subprocess.DEVNULL)
 tty.setraw(0)
 text = ''
 while True:
@@ -348,6 +351,36 @@ class CloseLive(unittest.TestCase):
         with open(f'{self.state}/at-term.json') as f:
             self.assertTrue(json.load(f)['obs']['executors']['e']['closed'])
 
+    def test_close_ends_what_the_executor_left_running_and_only_that(self):
+        for force in ((), ('--force',)):
+            with self.subTest(force = force):
+                pids = os.path.join(self.state, 'kids')
+                with contextlib.suppress(OSError):
+                    os.remove(pids)
+                # a child, and one that left the tree at once (setsid in a subshell); twins with the same command outside
+                self.tmux('set-environment', '-g', 'LAB_KIDS', f'sleep 7351 & echo $! >> {pids}; '
+                          f'(setsid sleep 7352 & echo $! >> {pids}); wait')
+                twins = [subprocess.Popen(['sleep', n], env = self.env) for n in ('7351', '7352')]
+                for twin in twins:
+                    self.addCleanup(twin.wait)
+                    self.addCleanup(twin.kill)
+                self.start('e', 'executor e --to obs')
+                deadline, kids = time.time() + 5, []
+                while time.time() < deadline and len(kids) < 2:
+                    time.sleep(0.05)
+                    with contextlib.suppress(OSError), open(pids) as f:
+                        kids = [int(p) for p in f.read().split()]
+                self.assertEqual(len(kids), 2)
+                for kid, born in [(k, roles.started(k)) for k in kids]:  # a red run leaves nothing behind either
+                    self.addCleanup(lambda k, t: roles.started(k) == t and os.kill(k, signal.SIGKILL), kid, born)
+                code, out = self.role('close', 'e', *force)
+                self.assertEqual(code, 0, out)
+                self.assertIn('ended what it left running', out)
+                procs = roles.processes()
+                self.assertEqual([k for k in kids if k in procs and procs[k][1][:1] == ['sleep']], [], out)
+                self.assertEqual([t.poll() for t in twins], [None, None], 'the same command outside the tree lives')
+                self.tmux('set-environment', '-g', '-u', 'LAB_KIDS')
+
     def raced(self, race, *args):
         out = subprocess.run([sys.executable, '-c', RACE, KIT, race, *args], env = self.observer, capture_output = True, text = True)
         return out.returncode, out.stdout + out.stderr
@@ -468,7 +501,7 @@ class RoleIntro(unittest.TestCase):
 
 class ObserverSkills(unittest.TestCase):
     """The real role-state hook; a tmux that answers nothing keeps the hook off every real server."""
-    DENY = 'this skill is not for the observer, give it to a subagent or an executor'
+    DENY = 'this skill is not for the observer, give it to a subagent or an executor\n' + roles.OPERATOR_LANGUAGE
 
     def setUp(self):
         self.home = tempfile.mkdtemp()

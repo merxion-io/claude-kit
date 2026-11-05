@@ -48,7 +48,7 @@ class Session:
         out = io.TextIOWrapper(io.BytesIO(), encoding = 'utf-8')  # strict, as the real stdout of the hook
         env = {'CLAUDE_ROLE_NAME': self.name, 'TMUX_PANE': '%1'}
         with mock.patch.dict(os.environ, env), mock.patch.object(roles, 'role_session', lambda: self.role), \
-                mock.patch.object(roles, 'pane_option', lambda *a: ''), \
+                mock.patch.object(roles, 'pane_option', lambda *a: ''), mock.patch.object(roles, 'leftovers', lambda *a: []), \
                 mock.patch.multiple(roles, **{s: mock.MagicMock() for s in STUBS}), \
                 mock.patch.object(sys, 'stdin', io.StringIO(json.dumps({'cwd': self.cwd, 'session_id': 'x', **ev}))), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
@@ -56,7 +56,8 @@ class Session:
                 os.environ.pop(launched, None)  # the run may itself sit inside a role session: no real pult, no foreign state dir
             role_state.main()
         out.flush()
-        lines = [json.loads(line)['hookSpecificOutput'] for line in out.buffer.getvalue().decode().splitlines()]
+        lines = [json.loads(line).get('hookSpecificOutput') for line in out.buffer.getvalue().decode().splitlines()]
+        lines = [line for line in lines if line]  # a Stop held by the leftover guard says {"decision": "block"}
         return lines[0] if lines else None
 
     def start(self, source = 'startup'):
